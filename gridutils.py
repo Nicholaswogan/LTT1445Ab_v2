@@ -69,16 +69,48 @@ def ensure_hdf5_layout(f, x, res, grid_shape, gridvals, gridnames, common):
     if 'inputs' not in f:
         f.create_dataset('inputs', shape=(np.prod(grid_shape),len(x),), dtype=x.dtype)
         f['inputs'][:] = np.nan
+    elif f['inputs'].shape[1] != len(x):
+        raise ValueError(
+            "Result layout mismatch: input vector length changed. "
+            f"Expected {f['inputs'].shape[1]}, got {len(x)}."
+        )
 
     # Create 'results' group if it doesn't exist
     if 'results' not in f:
         f.create_group('results')
 
-    # For each result key, create dataset if necessary
+    existing_keys = set(f['results'].keys())
+    current_keys = set(res.keys())
+
+    # If results already exist, enforce exact key matches.
+    if len(existing_keys) > 0 and current_keys != existing_keys:
+        missing = sorted(existing_keys - current_keys)
+        extra = sorted(current_keys - existing_keys)
+        raise ValueError(
+            "Result layout mismatch: output keys changed. "
+            f"Missing keys: {missing if missing else '[]'}, "
+            f"extra keys: {extra if extra else '[]'}."
+        )
+
+    # For each result key, create dataset on first successful result, then enforce shape/dtype.
     for key, val in res.items():
-        data_shape = grid_shape + val.shape  # accommodate vector outputs
+        val_arr = np.asarray(val)
+        data_shape = grid_shape + val_arr.shape  # accommodate vector outputs
         if key not in f['results']:
-            f['results'].create_dataset(key, shape=data_shape, dtype=val.dtype)
+            f['results'].create_dataset(key, shape=data_shape, dtype=val_arr.dtype)
+        else:
+            ds = f['results'][key]
+            if ds.shape != data_shape:
+                raise ValueError(
+                    "Result layout mismatch: output shape changed for key "
+                    f"'{key}'. Expected per-grid value shape {ds.shape[len(grid_shape):]}, "
+                    f"got {val_arr.shape}."
+                )
+            if ds.dtype != val_arr.dtype:
+                raise ValueError(
+                    "Result layout mismatch: output dtype changed for key "
+                    f"'{key}'. Expected {ds.dtype}, got {val_arr.dtype}."
+                )
 
     if 'completed' not in f:
         f.create_dataset('completed', shape=(np.prod(grid_shape),), dtype='bool')
@@ -88,7 +120,7 @@ def write_result_hdf5(f, index, x, res, grid_shape):
     unraveled_idx = np.unravel_index(index, grid_shape)
     f['inputs'][index] = x
     for key, val in res.items():
-        f['results'][key][unraveled_idx] = val
+        f['results'][key][unraveled_idx] = np.asarray(val)
     f['completed'][index] = True
 
 def save_result_hdf5(filename, index, x, res, grid_shape, gridvals, gridnames, common):
@@ -154,16 +186,17 @@ def master(model_func, gridvals, gridnames, filename, progress_filename, common)
                 x = inputs[index]
                 try:
                     res = model_func(x)
-                    ensure_hdf5_layout(h5f, x, res, gridshape, gridvals, gridnames, common)
-                    write_result_hdf5(h5f, index, x, res, gridshape)
-                    h5f.flush()
-                    pbar.update(1)
-                    log_file.flush()
                 except Exception as e:
                     # Intentionally catch Exception (not BaseException) so Ctrl-C/KeyboardInterrupt
                     # can still stop the run immediately.
                     print(f"Rank 0 failed on job {index}: {repr(e)}", file=log_file, flush=True)
                     print(traceback.format_exc(), file=log_file, flush=True)
+                    continue
+                ensure_hdf5_layout(h5f, x, res, gridshape, gridvals, gridnames, common)
+                write_result_hdf5(h5f, index, x, res, gridshape)
+                h5f.flush()
+                pbar.update(1)
+                log_file.flush()
             pbar.close()
         return
     
