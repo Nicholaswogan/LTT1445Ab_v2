@@ -243,9 +243,17 @@ def master(
 
     serialized_model = pickle.dumps(model_func)
 
+    # Start a fresh log file for this run, then append throughout.
+    with open(progress_filename, 'w'):
+        pass
+
+    def _log(msg):
+        with open(progress_filename, 'a') as lf:
+            print(msg, file=lf, flush=True)
+
     # Initialize HDF5 if needed
     if not os.path.exists(filename):
-        print("Initializing HDF5 output...")
+        _log("Initializing HDF5 output...")
         initialize_hdf5(filename)
     else:
         check_hdf5(filename, gridvals, gridnames, common)
@@ -254,11 +262,11 @@ def master(
     n_total = inputs.shape[0]
     n_completed = len(completed_inds)
     if n_completed > 0:
-        print(f'Calculations completed/total: {n_completed}/{n_total}.')
+        _log(f'Calculations completed/total: {n_completed}/{n_total}.')
         if n_completed == n_total:
-            print('All calculations completed.')
+            _log('All calculations completed.')
         else:
-            print('Restarting calculations...')
+            _log('Restarting calculations...')
 
     # Get inputs that have not yet been computed
     completed_set = set(completed_inds.tolist())
@@ -267,7 +275,7 @@ def master(
 
     # Handle single-rank runs without worker processes.
     if size == 1:
-        with open(progress_filename, 'w') as log_file, h5py.File(filename, 'a') as h5f:
+        with open(progress_filename, 'a') as log_file, h5py.File(filename, 'a') as h5f:
             pbar = tqdm(total=n_total, initial=n_completed, file=log_file, dynamic_ncols=True)
             pending_flush = 0
             stop_requested = False
@@ -316,7 +324,7 @@ def master(
         return
     
     # Open progress log file for writing
-    with open(progress_filename, 'w') as log_file, h5py.File(filename, 'a') as h5f:
+    with open(progress_filename, 'a') as log_file, h5py.File(filename, 'a') as h5f:
         pbar = tqdm(total=n_total, initial=n_completed, file=log_file, dynamic_ncols=True)
         status = MPI.Status()
         pending_flush = 0
