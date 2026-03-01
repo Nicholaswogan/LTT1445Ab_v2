@@ -276,7 +276,13 @@ def master(
     # Handle single-rank runs without worker processes.
     if size == 1:
         with open(progress_filename, 'a') as log_file, h5py.File(filename, 'a') as h5f:
-            pbar = tqdm(total=n_total, initial=n_completed, file=log_file, dynamic_ncols=True)
+            pbar = tqdm(
+                total=n_total,
+                initial=n_completed,
+                file=log_file,
+                dynamic_ncols=True,
+                smoothing=0.0,
+            )
             pending_flush = 0
             stop_requested = False
             for index in job_indices:
@@ -325,7 +331,13 @@ def master(
     
     # Open progress log file for writing
     with open(progress_filename, 'a') as log_file, h5py.File(filename, 'a') as h5f:
-        pbar = tqdm(total=n_total, initial=n_completed, file=log_file, dynamic_ncols=True)
+        pbar = tqdm(
+            total=n_total,
+            initial=n_completed,
+            file=log_file,
+            dynamic_ncols=True,
+            smoothing=0.0,
+        )
         status = MPI.Status()
         pending_flush = 0
         stop_requested = False
