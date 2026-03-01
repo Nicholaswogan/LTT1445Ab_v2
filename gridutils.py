@@ -75,7 +75,18 @@ def check_hdf5(filename, gridvals, gridnames, common):
                         % (key, filename)
                     )
 
-def ensure_hdf5_layout(f, x, res, grid_shape, gridvals, gridnames, common):
+def ensure_hdf5_layout(
+    f,
+    x,
+    res,
+    grid_shape,
+    gridvals,
+    gridnames,
+    common,
+    compression=None,
+    compression_opts=None,
+    shuffle=False,
+):
     # Save the gridvals if that has not happened
     if 'gridvals' not in f:
         f.create_group('gridvals')
@@ -127,7 +138,15 @@ def ensure_hdf5_layout(f, x, res, grid_shape, gridvals, gridnames, common):
         val_arr = np.asarray(val)
         data_shape = grid_shape + val_arr.shape  # accommodate vector outputs
         if key not in f['results']:
-            f['results'].create_dataset(key, shape=data_shape, dtype=val_arr.dtype)
+            create_kwargs = {}
+            if compression is not None:
+                create_kwargs['compression'] = compression
+                if compression_opts is not None:
+                    create_kwargs['compression_opts'] = compression_opts
+                create_kwargs['shuffle'] = shuffle
+                # Compression requires chunked storage; let h5py choose a chunk shape.
+                create_kwargs['chunks'] = True
+            f['results'].create_dataset(key, shape=data_shape, dtype=val_arr.dtype, **create_kwargs)
         else:
             ds = f['results'][key]
             if ds.shape != data_shape:
@@ -153,10 +172,33 @@ def write_result_hdf5(f, index, x, res, grid_shape):
         f['results'][key][unraveled_idx] = np.asarray(val)
     f['completed'][index] = True
 
-def save_result_hdf5(filename, index, x, res, grid_shape, gridvals, gridnames, common):
+def save_result_hdf5(
+    filename,
+    index,
+    x,
+    res,
+    grid_shape,
+    gridvals,
+    gridnames,
+    common,
+    compression=None,
+    compression_opts=None,
+    shuffle=False,
+):
     """Save a single result to the HDF5 file."""
     with h5py.File(filename, 'a') as f:
-        ensure_hdf5_layout(f, x, res, grid_shape, gridvals, gridnames, common)
+        ensure_hdf5_layout(
+            f,
+            x,
+            res,
+            grid_shape,
+            gridvals,
+            gridnames,
+            common,
+            compression=compression,
+            compression_opts=compression_opts,
+            shuffle=shuffle,
+        )
         write_result_hdf5(f, index, x, res, grid_shape)
 
 def load_completed_mask(filename):
@@ -176,7 +218,18 @@ def assign_job(comm, rank, serialized_model, job_iter, inputs):
         comm.send(None, dest=rank, tag=0)
         return False
 
-def master(model_func, gridvals, gridnames, filename, progress_filename, common, flush_every_n=1):
+def master(
+    model_func,
+    gridvals,
+    gridnames,
+    filename,
+    progress_filename,
+    common,
+    flush_every_n=1,
+    compression=None,
+    compression_opts=None,
+    shuffle=False,
+):
 
     if len(gridvals) != len(gridnames):
         raise ValueError('`gridvals` and `gridnames` have incompatable shapes.')
@@ -227,7 +280,18 @@ def master(model_func, gridvals, gridnames, filename, progress_filename, common,
                     print(f"Rank 0 failed on job {index}: {repr(e)}", file=log_file, flush=True)
                     print(traceback.format_exc(), file=log_file, flush=True)
                     continue
-                ensure_hdf5_layout(h5f, x, res, gridshape, gridvals, gridnames, common)
+                ensure_hdf5_layout(
+                    h5f,
+                    x,
+                    res,
+                    gridshape,
+                    gridvals,
+                    gridnames,
+                    common,
+                    compression=compression,
+                    compression_opts=compression_opts,
+                    shuffle=shuffle,
+                )
                 write_result_hdf5(h5f, index, x, res, gridshape)
                 pending_flush += 1
                 if pending_flush >= flush_every_n:
@@ -263,7 +327,18 @@ def master(model_func, gridvals, gridnames, filename, progress_filename, common,
                 index, x, res = msg['index'], msg['x'], msg['res']
 
                 # Save the result
-                ensure_hdf5_layout(h5f, x, res, gridshape, gridvals, gridnames, common)
+                ensure_hdf5_layout(
+                    h5f,
+                    x,
+                    res,
+                    gridshape,
+                    gridvals,
+                    gridnames,
+                    common,
+                    compression=compression,
+                    compression_opts=compression_opts,
+                    shuffle=shuffle,
+                )
                 write_result_hdf5(h5f, index, x, res, gridshape)
                 pending_flush += 1
                 if pending_flush >= flush_every_n:
@@ -319,7 +394,18 @@ def worker():
         # Send the result or error to the master process
         comm.send(msg, dest=0, tag=2)
 
-def make_grid(model_func, gridvals, gridnames, filename, progress_filename, common=None, flush_every_n=1):
+def make_grid(
+    model_func,
+    gridvals,
+    gridnames,
+    filename,
+    progress_filename,
+    common=None,
+    flush_every_n=1,
+    compression=None,
+    compression_opts=None,
+    shuffle=False,
+):
     """
     Run a parallel grid computation using MPI, saving results to an HDF5 file.
 
@@ -357,6 +443,15 @@ def make_grid(model_func, gridvals, gridnames, filename, progress_filename, comm
         Flush HDF5 buffers to disk after this many successful writes. Use 1 for maximum
         restart durability, larger values for better write performance.
 
+    compression : str or None, optional
+        Compression filter for result datasets (e.g. 'gzip', 'lzf'). If None, no compression.
+
+    compression_opts : int or None, optional
+        Compression settings for the selected compression filter (e.g. gzip level).
+
+    shuffle : bool, optional
+        Enable HDF5 shuffle filter when compression is enabled.
+
     Notes
     -----
     - This function must be run with an MPI launcher (e.g., `mpiexec -n N python script.py`).
@@ -370,18 +465,47 @@ def make_grid(model_func, gridvals, gridnames, filename, progress_filename, comm
 
     if rank == 0:
         # Master process
-        master(model_func, gridvals, gridnames, filename, progress_filename, common, flush_every_n=flush_every_n)
+        master(
+            model_func,
+            gridvals,
+            gridnames,
+            filename,
+            progress_filename,
+            common,
+            flush_every_n=flush_every_n,
+            compression=compression,
+            compression_opts=compression_opts,
+            shuffle=shuffle,
+        )
     else:
         # Worker process
         worker()
 
-def resave_with_new_grid(old_filename, new_gridvals, new_gridnames, new_filename):
+def resave_with_new_grid(
+    old_filename,
+    new_gridvals,
+    new_gridnames,
+    new_filename,
+    compression=None,
+    compression_opts=None,
+    shuffle=False,
+):
     """
     Create a new restartable HDF5 grid file from a different grid definition.
 
     Grid dimensions must match exactly by name and order; only grid values may change.
     Completed points from `old_filename` are copied into `new_filename` where
     coordinates overlap exactly (within a tight floating tolerance).
+
+    Parameters
+    ----------
+    compression : str or None, optional
+        Compression filter for result datasets in the new file (e.g. 'gzip', 'lzf').
+        If None, no compression is applied.
+    compression_opts : int or None, optional
+        Compression settings for the selected compression filter (e.g. gzip level).
+    shuffle : bool, optional
+        Enable HDF5 shuffle filter when compression is enabled.
     """
     if os.path.exists(new_filename):
         raise FileExistsError(f'Output file already exists: {new_filename}')
@@ -485,7 +609,19 @@ def resave_with_new_grid(old_filename, new_gridvals, new_gridnames, new_filename
 
             newf.create_group('results')
             for key, tail_shape, dtype in result_specs:
-                newf['results'].create_dataset(key, shape=new_gridshape + tail_shape, dtype=dtype)
+                create_kwargs = {}
+                if compression is not None:
+                    create_kwargs['compression'] = compression
+                    if compression_opts is not None:
+                        create_kwargs['compression_opts'] = compression_opts
+                    create_kwargs['shuffle'] = shuffle
+                    create_kwargs['chunks'] = True
+                newf['results'].create_dataset(
+                    key,
+                    shape=new_gridshape + tail_shape,
+                    dtype=dtype,
+                    **create_kwargs,
+                )
 
             newf.create_dataset('completed', shape=(n_new_points,), dtype='bool')
             newf['completed'][:] = False
