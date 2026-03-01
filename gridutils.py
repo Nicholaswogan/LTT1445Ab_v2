@@ -176,10 +176,12 @@ def assign_job(comm, rank, serialized_model, job_iter, inputs):
         comm.send(None, dest=rank, tag=0)
         return False
 
-def master(model_func, gridvals, gridnames, filename, progress_filename, common):
+def master(model_func, gridvals, gridnames, filename, progress_filename, common, flush_every_n=1):
 
     if len(gridvals) != len(gridnames):
         raise ValueError('`gridvals` and `gridnames` have incompatable shapes.')
+    if flush_every_n < 1:
+        raise ValueError('`flush_every_n` must be >= 1.')
 
     comm = MPI.COMM_WORLD
     size = comm.Get_size()
@@ -214,6 +216,7 @@ def master(model_func, gridvals, gridnames, filename, progress_filename, common)
     if size == 1:
         with open(progress_filename, 'w') as log_file, h5py.File(filename, 'a') as h5f:
             pbar = tqdm(total=n_total, initial=n_completed, file=log_file, dynamic_ncols=True)
+            pending_flush = 0
             for index in job_indices:
                 x = inputs[index]
                 try:
@@ -226,9 +229,14 @@ def master(model_func, gridvals, gridnames, filename, progress_filename, common)
                     continue
                 ensure_hdf5_layout(h5f, x, res, gridshape, gridvals, gridnames, common)
                 write_result_hdf5(h5f, index, x, res, gridshape)
-                h5f.flush()
+                pending_flush += 1
+                if pending_flush >= flush_every_n:
+                    h5f.flush()
+                    pending_flush = 0
                 pbar.update(1)
                 log_file.flush()
+            if pending_flush > 0:
+                h5f.flush()
             pbar.close()
         return
     
@@ -236,6 +244,7 @@ def master(model_func, gridvals, gridnames, filename, progress_filename, common)
     with open(progress_filename, 'w') as log_file, h5py.File(filename, 'a') as h5f:
         pbar = tqdm(total=n_total, initial=n_completed, file=log_file, dynamic_ncols=True)
         status = MPI.Status()
+        pending_flush = 0
 
         # Assign initial workers
         active_workers = 0
@@ -256,7 +265,10 @@ def master(model_func, gridvals, gridnames, filename, progress_filename, common)
                 # Save the result
                 ensure_hdf5_layout(h5f, x, res, gridshape, gridvals, gridnames, common)
                 write_result_hdf5(h5f, index, x, res, gridshape)
-                h5f.flush()
+                pending_flush += 1
+                if pending_flush >= flush_every_n:
+                    h5f.flush()
+                    pending_flush = 0
                 
                 pbar.update(1)
                 log_file.flush()
@@ -273,6 +285,8 @@ def master(model_func, gridvals, gridnames, filename, progress_filename, common)
             if not assign_job(comm, worker_rank, serialized_model, job_iter, inputs):
                 active_workers -= 1
 
+        if pending_flush > 0:
+            h5f.flush()
         pbar.close()
 
 def worker():
@@ -305,7 +319,7 @@ def worker():
         # Send the result or error to the master process
         comm.send(msg, dest=0, tag=2)
 
-def make_grid(model_func, gridvals, gridnames, filename, progress_filename, common=None):
+def make_grid(model_func, gridvals, gridnames, filename, progress_filename, common=None, flush_every_n=1):
     """
     Run a parallel grid computation using MPI, saving results to an HDF5 file.
 
@@ -339,6 +353,10 @@ def make_grid(model_func, gridvals, gridnames, filename, progress_filename, comm
         Dictionary of arrays that will be saved in the HDF5 file. Sometimes saved results will
         share a common axis that might want to be saved alongside the data without repetition.
 
+    flush_every_n: int, optional
+        Flush HDF5 buffers to disk after this many successful writes. Use 1 for maximum
+        restart durability, larger values for better write performance.
+
     Notes
     -----
     - This function must be run with an MPI launcher (e.g., `mpiexec -n N python script.py`).
@@ -352,7 +370,7 @@ def make_grid(model_func, gridvals, gridnames, filename, progress_filename, comm
 
     if rank == 0:
         # Master process
-        master(model_func, gridvals, gridnames, filename, progress_filename, common)
+        master(model_func, gridvals, gridnames, filename, progress_filename, common, flush_every_n=flush_every_n)
     else:
         # Worker process
         worker()
