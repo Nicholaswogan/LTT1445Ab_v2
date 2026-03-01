@@ -375,6 +375,162 @@ def make_grid(model_func, gridvals, gridnames, filename, progress_filename, comm
         # Worker process
         worker()
 
+def resave_with_new_grid(old_filename, new_gridvals, new_gridnames, new_filename):
+    """
+    Create a new restartable HDF5 grid file from a different grid definition.
+
+    Grid dimensions must match exactly by name and order; only grid values may change.
+    Completed points from `old_filename` are copied into `new_filename` where
+    coordinates overlap exactly (within a tight floating tolerance).
+    """
+    if os.path.exists(new_filename):
+        raise FileExistsError(f'Output file already exists: {new_filename}')
+
+    new_gridvals = tuple(np.asarray(v) for v in new_gridvals)
+    if len(new_gridvals) != len(new_gridnames):
+        raise ValueError('`new_gridvals` and `new_gridnames` must have the same length.')
+
+    def _normalize_names(values):
+        out = []
+        for v in values:
+            if isinstance(v, bytes):
+                out.append(v.decode('utf-8'))
+            else:
+                out.append(str(v))
+        return out
+
+    with h5py.File(old_filename, 'r') as oldf:
+        if 'gridvals' not in oldf or 'gridnames' not in oldf or 'results' not in oldf:
+            raise ValueError('Old file is missing one of required groups/datasets: gridvals, gridnames, results.')
+
+        old_gridvals = []
+        for i in range(len(oldf['gridvals'])):
+            old_gridvals.append(oldf['gridvals'][f'{i}'][:])
+        old_gridvals = tuple(old_gridvals)
+
+        old_gridnames = _normalize_names(oldf['gridnames'][:])
+        new_gridnames_norm = _normalize_names(new_gridnames)
+        if old_gridnames != new_gridnames_norm:
+            raise ValueError(
+                'Grid-name mismatch. `new_gridnames` must match old grid names exactly (same order). '
+                f'Old: {old_gridnames}, New: {new_gridnames_norm}.'
+            )
+
+        old_gridshape = tuple(len(v) for v in old_gridvals)
+        new_gridshape = tuple(len(v) for v in new_gridvals)
+        ndim = len(old_gridshape)
+        if len(new_gridshape) != ndim:
+            raise ValueError(
+                f'Grid dimensionality mismatch. Old dims: {ndim}, new dims: {len(new_gridshape)}.'
+            )
+
+        # Map each old axis index into new axis index (or -1 if no overlap).
+        axis_index_maps = []
+        for dim in range(ndim):
+            old_axis = np.asarray(old_gridvals[dim])
+            new_axis = np.asarray(new_gridvals[dim])
+            mapped = np.full(old_axis.shape, -1, dtype=int)
+            for i, old_val in enumerate(old_axis):
+                matches = np.where(np.isclose(new_axis, old_val, rtol=1e-12, atol=1e-14))[0]
+                if matches.size > 1:
+                    raise ValueError(
+                        f'Axis {dim} maps old value {old_val} to multiple new indices: '
+                        f'{matches.tolist()}. Axis values must be unique.'
+                    )
+                if matches.size == 1:
+                    mapped[i] = int(matches[0])
+            axis_index_maps.append(mapped)
+
+        common_data = {}
+        if 'common' in oldf:
+            for key in oldf['common'].keys():
+                common_data[key] = oldf['common'][key][:]
+
+        result_specs = []
+        for key in oldf['results'].keys():
+            ds = oldf['results'][key]
+            if ds.shape[:ndim] != old_gridshape:
+                raise ValueError(
+                    f'Old results dataset shape mismatch for key {key}: '
+                    f'expected leading shape {old_gridshape}, got {ds.shape[:ndim]}.'
+                )
+            result_specs.append((key, ds.shape[ndim:], ds.dtype))
+
+        if 'completed' in oldf:
+            completed_inds = np.where(oldf['completed'][:])[0]
+        else:
+            completed_inds = np.array([], dtype=int)
+
+        has_old_inputs = 'inputs' in oldf
+        old_inputs_dtype = oldf['inputs'].dtype if has_old_inputs else np.float64
+        n_new_points = int(np.prod(new_gridshape))
+
+        with h5py.File(new_filename, 'w') as newf:
+            newf.create_group('gridvals')
+            for i, gv in enumerate(new_gridvals):
+                newf['gridvals'].create_dataset(f'{i}', data=gv, shape=(len(gv),), dtype=gv.dtype)
+
+            gridnames_arr = np.array(new_gridnames_norm, dtype=object)
+            newf.create_dataset('gridnames', data=gridnames_arr, dtype=h5py.string_dtype(encoding='utf-8'))
+
+            newf.create_group('common')
+            for key, val in common_data.items():
+                newf['common'].create_dataset(key, data=val, shape=val.shape, dtype=val.dtype)
+
+            newf.create_dataset('inputs', shape=(n_new_points, ndim), dtype=old_inputs_dtype)
+            if np.issubdtype(old_inputs_dtype, np.floating):
+                newf['inputs'][:] = np.nan
+            else:
+                newf['inputs'][:] = 0
+
+            newf.create_group('results')
+            for key, tail_shape, dtype in result_specs:
+                newf['results'].create_dataset(key, shape=new_gridshape + tail_shape, dtype=dtype)
+
+            newf.create_dataset('completed', shape=(n_new_points,), dtype='bool')
+            newf['completed'][:] = False
+
+            copied_old_points = 0
+            skipped_old_points = 0
+            filled_new_points = 0
+            collisions = 0
+            for old_index in completed_inds:
+                old_multi = np.unravel_index(int(old_index), old_gridshape)
+                mapped_inds = [axis_index_maps[d][old_multi[d]] for d in range(ndim)]
+                if any(ind < 0 for ind in mapped_inds):
+                    skipped_old_points += 1
+                    continue
+                new_multi = tuple(mapped_inds)
+                new_lin = np.ravel_multi_index(new_multi, new_gridshape)
+                if newf['completed'][new_lin]:
+                    collisions += 1
+                    raise ValueError(
+                        f'Collision while remapping old completed point {int(old_index)} to '
+                        f'new index {new_lin}. Multiple old points map to the same new point.'
+                    )
+
+                if has_old_inputs:
+                    x = oldf['inputs'][old_index]
+                else:
+                    x = np.array([old_gridvals[d][old_multi[d]] for d in range(ndim)])
+                newf['inputs'][new_lin] = x
+
+                for key, _, _ in result_specs:
+                    newf['results'][key][new_multi] = oldf['results'][key][old_multi]
+                newf['completed'][new_lin] = True
+                copied_old_points += 1
+                filled_new_points += 1
+
+    return {
+        'copied_old_points': int(copied_old_points),
+        'skipped_old_points': int(skipped_old_points),
+        'filled_new_points': int(filled_new_points),
+        'collisions': int(collisions),
+        'added_names': [],
+        'dropped_names': [],
+        'shared_names': old_gridnames,
+    }
+
 class GridInterpolator():
     """
     A class for interpolating data saved from an HDF5 grid of simulation outputs.
