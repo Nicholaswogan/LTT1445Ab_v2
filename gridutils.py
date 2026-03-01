@@ -270,10 +270,19 @@ def master(
         with open(progress_filename, 'w') as log_file, h5py.File(filename, 'a') as h5f:
             pbar = tqdm(total=n_total, initial=n_completed, file=log_file, dynamic_ncols=True)
             pending_flush = 0
+            stop_requested = False
             for index in job_indices:
                 x = inputs[index]
                 try:
                     res = model_func(x)
+                except KeyboardInterrupt:
+                    stop_requested = True
+                    print(
+                        'KeyboardInterrupt received: stopping after current write boundary.',
+                        file=log_file,
+                        flush=True,
+                    )
+                    break
                 except Exception as e:
                     # Intentionally catch Exception (not BaseException) so Ctrl-C/KeyboardInterrupt
                     # can still stop the run immediately.
@@ -301,6 +310,8 @@ def master(
                 log_file.flush()
             if pending_flush > 0:
                 h5f.flush()
+            if stop_requested:
+                print('Graceful stop complete.', file=log_file, flush=True)
             pbar.close()
         return
     
@@ -309,18 +320,32 @@ def master(
         pbar = tqdm(total=n_total, initial=n_completed, file=log_file, dynamic_ncols=True)
         status = MPI.Status()
         pending_flush = 0
+        stop_requested = False
+        interrupt_count = 0
 
         # Assign initial workers
-        active_workers = 0
+        active_workers = set()
         for rank in range(1, size):
             if assign_job(comm, rank, serialized_model, job_iter, inputs):
-                active_workers += 1
+                active_workers.add(rank)
 
         # Continue until all workers are terminated
-        while active_workers > 0:
+        while len(active_workers) > 0:
 
             # Get result form worker
-            msg = comm.recv(source=MPI.ANY_SOURCE, tag=2, status=status)
+            try:
+                msg = comm.recv(source=MPI.ANY_SOURCE, tag=2, status=status)
+            except KeyboardInterrupt:
+                interrupt_count += 1
+                if interrupt_count == 1:
+                    stop_requested = True
+                    print(
+                        'KeyboardInterrupt received: stopping new assignments and draining in-flight jobs.',
+                        file=log_file,
+                        flush=True,
+                    )
+                    continue
+                raise
             worker_rank = status.Get_source()
 
             if msg['status'] == 'ok':
@@ -357,11 +382,17 @@ def master(
                 raise RuntimeError(f"Unknown worker message status: {msg['status']}")
 
             # Assign a new job to the worker.
-            if not assign_job(comm, worker_rank, serialized_model, job_iter, inputs):
-                active_workers -= 1
+            if stop_requested:
+                comm.send(None, dest=worker_rank, tag=0)
+                active_workers.remove(worker_rank)
+            else:
+                if not assign_job(comm, worker_rank, serialized_model, job_iter, inputs):
+                    active_workers.remove(worker_rank)
 
         if pending_flush > 0:
             h5f.flush()
+        if stop_requested:
+            print('Graceful MPI stop complete.', file=log_file, flush=True)
         pbar.close()
 
 def worker():
