@@ -209,14 +209,21 @@ def load_completed_mask(filename):
             return np.where(f['completed'])[0]
     return np.array([], dtype=int)
 
-def assign_job(comm, rank, serialized_model, job_iter, inputs):
-    try:
-        job_index = next(job_iter)
-        comm.send((serialized_model, job_index, inputs[job_index]), dest=rank, tag=1)
+def assign_job(comm, rank, serialized_model, job_iter, inputs, batch_size=1):
+    batch = []
+    for _ in range(batch_size):
+        try:
+            job_index = next(job_iter)
+            batch.append((job_index, inputs[job_index]))
+        except StopIteration:
+            break
+
+    if len(batch) > 0:
+        comm.send((serialized_model, batch), dest=rank, tag=1)
         return True
-    except StopIteration:
-        comm.send(None, dest=rank, tag=0)
-        return False
+
+    comm.send(None, dest=rank, tag=0)
+    return False
 
 def master(
     model_func,
@@ -229,12 +236,15 @@ def master(
     compression=None,
     compression_opts=None,
     shuffle=False,
+    batch_size=1,
 ):
 
     if len(gridvals) != len(gridnames):
         raise ValueError('`gridvals` and `gridnames` have incompatable shapes.')
     if flush_every_n < 1:
         raise ValueError('`flush_every_n` must be >= 1.')
+    if batch_size < 1:
+        raise ValueError('`batch_size` must be >= 1.')
 
     comm = MPI.COMM_WORLD
     size = comm.Get_size()
@@ -346,7 +356,7 @@ def master(
         # Assign initial workers
         active_workers = set()
         for rank in range(1, size):
-            if assign_job(comm, rank, serialized_model, job_iter, inputs):
+            if assign_job(comm, rank, serialized_model, job_iter, inputs, batch_size=batch_size):
                 active_workers.add(rank)
 
         # Continue until all workers are terminated
@@ -368,45 +378,58 @@ def master(
                 raise
             worker_rank = status.Get_source()
 
-            if msg['status'] == 'ok':
-                index, x, res = msg['index'], msg['x'], msg['res']
-
-                # Save the result
-                ensure_hdf5_layout(
-                    h5f,
-                    x,
-                    res,
-                    gridshape,
-                    gridvals,
-                    gridnames,
-                    common,
-                    compression=compression,
-                    compression_opts=compression_opts,
-                    shuffle=shuffle,
-                )
-                write_result_hdf5(h5f, index, x, res, gridshape)
-                pending_flush += 1
-                if pending_flush >= flush_every_n:
-                    h5f.flush()
-                    pending_flush = 0
-                
-                pbar.update(1)
-                log_file.flush()
-            elif msg['status'] == 'error':
-                index = msg['index']
-                err = msg['error']
-                tb = msg['traceback']
-                print(f"Worker {worker_rank} failed on job {index}: {err}", file=log_file, flush=True)
-                print(tb, file=log_file, flush=True)
+            if isinstance(msg, dict):
+                msgs = [msg]
             else:
-                raise RuntimeError(f"Unknown worker message status: {msg['status']}")
+                msgs = msg
+
+            for item in msgs:
+                if item['status'] == 'ok':
+                    index, x, res = item['index'], item['x'], item['res']
+
+                    # Save the result
+                    ensure_hdf5_layout(
+                        h5f,
+                        x,
+                        res,
+                        gridshape,
+                        gridvals,
+                        gridnames,
+                        common,
+                        compression=compression,
+                        compression_opts=compression_opts,
+                        shuffle=shuffle,
+                    )
+                    write_result_hdf5(h5f, index, x, res, gridshape)
+                    pending_flush += 1
+                    if pending_flush >= flush_every_n:
+                        h5f.flush()
+                        pending_flush = 0
+                    
+                    pbar.update(1)
+                    log_file.flush()
+                elif item['status'] == 'error':
+                    index = item['index']
+                    err = item['error']
+                    tb = item['traceback']
+                    print(f"Worker {worker_rank} failed on job {index}: {err}", file=log_file, flush=True)
+                    print(tb, file=log_file, flush=True)
+                else:
+                    raise RuntimeError(f"Unknown worker message status: {item['status']}")
 
             # Assign a new job to the worker.
             if stop_requested:
                 comm.send(None, dest=worker_rank, tag=0)
                 active_workers.remove(worker_rank)
             else:
-                if not assign_job(comm, worker_rank, serialized_model, job_iter, inputs):
+                if not assign_job(
+                    comm,
+                    worker_rank,
+                    serialized_model,
+                    job_iter,
+                    inputs,
+                    batch_size=batch_size,
+                ):
                     active_workers.remove(worker_rank)
 
         if pending_flush > 0:
@@ -425,25 +448,27 @@ def worker():
         if status.Get_tag() == 0:
             break # Shutdown signal
 
-        # Call the function on the inputs
-        serialized_model, index, x = data
+        # Call the function on the inputs batch.
+        serialized_model, batch = data
         model_func = pickle.loads(serialized_model)
-        try:
-            res = model_func(x)
-            msg = {'status': 'ok', 'index': index, 'x': x, 'res': res}
-        except Exception as e:
-            # Intentionally catch Exception (not BaseException) so Ctrl-C/KeyboardInterrupt
-            # can still stop the run immediately.
-            msg = {
-                'status': 'error',
-                'index': index,
-                'x': x,
-                'error': repr(e),
-                'traceback': traceback.format_exc(),
-            }
+        msgs = []
+        for index, x in batch:
+            try:
+                res = model_func(x)
+                msgs.append({'status': 'ok', 'index': index, 'x': x, 'res': res})
+            except Exception as e:
+                # Intentionally catch Exception (not BaseException) so Ctrl-C/KeyboardInterrupt
+                # can still stop the run immediately.
+                msgs.append({
+                    'status': 'error',
+                    'index': index,
+                    'x': x,
+                    'error': repr(e),
+                    'traceback': traceback.format_exc(),
+                })
 
-        # Send the result or error to the master process
-        comm.send(msg, dest=0, tag=2)
+        # Send the batched results/errors to the master process
+        comm.send(msgs, dest=0, tag=2)
 
 def make_grid(
     model_func,
@@ -456,6 +481,7 @@ def make_grid(
     compression=None,
     compression_opts=None,
     shuffle=False,
+    batch_size=1,
 ):
     """
     Run a parallel grid computation using MPI, saving results to an HDF5 file.
@@ -503,6 +529,10 @@ def make_grid(
     shuffle : bool, optional
         Enable HDF5 shuffle filter when compression is enabled.
 
+    batch_size : int, optional
+        Number of grid points each worker computes before returning a result
+        message to the master. Larger values reduce MPI/message overhead.
+
     Notes
     -----
     - This function must be run with an MPI launcher (e.g., `mpiexec -n N python script.py`).
@@ -527,6 +557,7 @@ def make_grid(
             compression=compression,
             compression_opts=compression_opts,
             shuffle=shuffle,
+            batch_size=batch_size,
         )
     else:
         # Worker process
