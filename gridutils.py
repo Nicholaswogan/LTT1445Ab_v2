@@ -196,9 +196,11 @@ def master(model_func, gridvals, gridnames, filename, progress_filename, common)
         check_hdf5(filename, gridvals, gridnames, common)
 
     completed_inds = load_completed_mask(filename)
-    if len(completed_inds) > 0:
-        print(f'Calculations completed/total: {len(completed_inds)}/{inputs.shape[0]}.')
-        if len(completed_inds) == inputs.shape[0]:
+    n_total = inputs.shape[0]
+    n_completed = len(completed_inds)
+    if n_completed > 0:
+        print(f'Calculations completed/total: {n_completed}/{n_total}.')
+        if n_completed == n_total:
             print('All calculations completed.')
         else:
             print('Restarting calculations...')
@@ -211,7 +213,7 @@ def master(model_func, gridvals, gridnames, filename, progress_filename, common)
     # Handle single-rank runs without worker processes.
     if size == 1:
         with open(progress_filename, 'w') as log_file, h5py.File(filename, 'a') as h5f:
-            pbar = tqdm(total=len(job_indices), file=log_file, dynamic_ncols=True)
+            pbar = tqdm(total=n_total, initial=n_completed, file=log_file, dynamic_ncols=True)
             for index in job_indices:
                 x = inputs[index]
                 try:
@@ -232,7 +234,7 @@ def master(model_func, gridvals, gridnames, filename, progress_filename, common)
     
     # Open progress log file for writing
     with open(progress_filename, 'w') as log_file, h5py.File(filename, 'a') as h5f:
-        pbar = tqdm(total=len(job_indices), file=log_file, dynamic_ncols=True)
+        pbar = tqdm(total=n_total, initial=n_completed, file=log_file, dynamic_ncols=True)
         status = MPI.Status()
 
         # Assign initial workers
