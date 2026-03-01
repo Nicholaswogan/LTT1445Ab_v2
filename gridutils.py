@@ -138,7 +138,8 @@ def master(model_func, gridvals, gridnames, filename, progress_filename, common)
             print('Restarting calculations...')
 
     # Get inputs that have not yet been computed
-    job_indices = [i for i in range(len(inputs)) if i not in completed_inds]
+    completed_set = set(completed_inds.tolist())
+    job_indices = [i for i in range(len(inputs)) if i not in completed_set]
     job_iter = iter(job_indices)
 
     # Handle single-rank runs without worker processes.
@@ -231,7 +232,7 @@ def worker():
         # Send the result or error to the master process
         comm.send(msg, dest=0, tag=2)
 
-def make_grid(model_func, gridvals, gridnames, filename, progress_filename, common={}):
+def make_grid(model_func, gridvals, gridnames, filename, progress_filename, common=None):
     """
     Run a parallel grid computation using MPI, saving results to an HDF5 file.
 
@@ -273,6 +274,8 @@ def make_grid(model_func, gridvals, gridnames, filename, progress_filename, comm
     """
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
+    if common is None:
+        common = {}
 
     if rank == 0:
         # Master process
