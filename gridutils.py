@@ -45,53 +45,57 @@ def check_hdf5(filename, gridvals, gridnames, common):
             if not np.allclose(f['common'][key][:], val):
                 raise Exception('Miss match between the input `common`, and the `common` in '+filename)
 
-def save_result_hdf5(filename, index, x, res, grid_shape, gridvals, gridnames, common):
-    """Save a single result to the preallocated HDF5 file."""
+def ensure_hdf5_layout(f, x, res, grid_shape, gridvals, gridnames, common):
+    # Save the gridvals if that has not happened
+    if 'gridvals' not in f:
+        f.create_group('gridvals')
+        for i,gridval in enumerate(gridvals):
+            key = '%i'%i
+            f['gridvals'].create_dataset(key, shape=(len(gridval),), dtype=gridval.dtype)
+            f['gridvals'][key][:] = gridval
 
+    if 'gridnames' not in f:
+        gridnames_array = np.array(gridnames)
+        f.create_dataset('gridnames', shape=(len(gridnames_array),), dtype=h5py.string_dtype())
+        f['gridnames'][:] = gridnames_array
+
+    if 'common' not in f:
+        f.create_group('common')
+        for key, val in common.items():
+            f['common'].create_dataset(key, shape=val.shape, dtype=val.dtype)
+            f['common'][key][:] = val
+
+    # Save input parameters
+    if 'inputs' not in f:
+        f.create_dataset('inputs', shape=(np.prod(grid_shape),len(x),), dtype=x.dtype)
+        f['inputs'][:] = np.nan
+
+    # Create 'results' group if it doesn't exist
+    if 'results' not in f:
+        f.create_group('results')
+
+    # For each result key, create dataset if necessary
+    for key, val in res.items():
+        data_shape = grid_shape + val.shape  # accommodate vector outputs
+        if key not in f['results']:
+            f['results'].create_dataset(key, shape=data_shape, dtype=val.dtype)
+
+    if 'completed' not in f:
+        f.create_dataset('completed', shape=(np.prod(grid_shape),), dtype='bool')
+        f['completed'][:] = np.zeros(np.prod(grid_shape),dtype='bool')
+
+def write_result_hdf5(f, index, x, res, grid_shape):
     unraveled_idx = np.unravel_index(index, grid_shape)
+    f['inputs'][index] = x
+    for key, val in res.items():
+        f['results'][key][unraveled_idx] = val
+    f['completed'][index] = True
 
+def save_result_hdf5(filename, index, x, res, grid_shape, gridvals, gridnames, common):
+    """Save a single result to the HDF5 file."""
     with h5py.File(filename, 'a') as f:
-
-        # Save the gridvals if that has not happened
-        if 'gridvals' not in f:
-            f.create_group('gridvals')
-            for i,gridval in enumerate(gridvals):
-                key = '%i'%i
-                f['gridvals'].create_dataset(key, shape=(len(gridval),), dtype=gridval.dtype)
-                f['gridvals'][key][:] = gridval
-
-        if 'gridnames' not in f:
-            gridnames_array = np.array(gridnames)
-            f.create_dataset('gridnames', shape=(len(gridnames_array),), dtype=h5py.string_dtype())
-            f['gridnames'][:] = gridnames_array
-
-        if 'common' not in f:
-            f.create_group('common')
-            for key, val in common.items():
-                f['common'].create_dataset(key, shape=val.shape, dtype=val.dtype)
-                f['common'][key][:] = val
-
-        # Save input parameters
-        if 'inputs' not in f:
-            f.create_dataset('inputs', shape=(np.prod(grid_shape),len(x),), dtype=x.dtype)
-            f['inputs'][:] = np.nan
-        f['inputs'][index] = x
-
-        # Create 'results' group if it doesn't exist
-        if 'results' not in f:
-            f.create_group('results')
-
-        # For each result key, create dataset if necessary, then write data
-        for key, val in res.items():
-            data_shape = grid_shape + val.shape  # accommodate vector outputs
-            if key not in f['results']:
-                f['results'].create_dataset(key, shape=data_shape, dtype=val.dtype)
-            f['results'][key][unraveled_idx] = val
-
-        if 'completed' not in f:
-            f.create_dataset('completed', shape=(np.prod(grid_shape),), dtype='bool')
-            f['completed'][:] = np.zeros(np.prod(grid_shape),dtype='bool')
-        f['completed'][index] = True
+        ensure_hdf5_layout(f, x, res, grid_shape, gridvals, gridnames, common)
+        write_result_hdf5(f, index, x, res, grid_shape)
 
 def load_completed_mask(filename):
     if os.path.isfile(filename):
@@ -144,13 +148,15 @@ def master(model_func, gridvals, gridnames, filename, progress_filename, common)
 
     # Handle single-rank runs without worker processes.
     if size == 1:
-        with open(progress_filename, 'w') as log_file:
+        with open(progress_filename, 'w') as log_file, h5py.File(filename, 'a') as h5f:
             pbar = tqdm(total=len(job_indices), file=log_file, dynamic_ncols=True)
             for index in job_indices:
                 x = inputs[index]
                 try:
                     res = model_func(x)
-                    save_result_hdf5(filename, index, x, res, gridshape, gridvals, gridnames, common)
+                    ensure_hdf5_layout(h5f, x, res, gridshape, gridvals, gridnames, common)
+                    write_result_hdf5(h5f, index, x, res, gridshape)
+                    h5f.flush()
                     pbar.update(1)
                     log_file.flush()
                 except Exception as e:
@@ -162,7 +168,7 @@ def master(model_func, gridvals, gridnames, filename, progress_filename, common)
         return
     
     # Open progress log file for writing
-    with open(progress_filename, 'w') as log_file:
+    with open(progress_filename, 'w') as log_file, h5py.File(filename, 'a') as h5f:
         pbar = tqdm(total=len(job_indices), file=log_file, dynamic_ncols=True)
         status = MPI.Status()
 
@@ -183,7 +189,9 @@ def master(model_func, gridvals, gridnames, filename, progress_filename, common)
                 index, x, res = msg['index'], msg['x'], msg['res']
 
                 # Save the result
-                save_result_hdf5(filename, index, x, res, gridshape, gridvals, gridnames, common)
+                ensure_hdf5_layout(h5f, x, res, gridshape, gridvals, gridnames, common)
+                write_result_hdf5(h5f, index, x, res, gridshape)
+                h5f.flush()
                 
                 pbar.update(1)
                 log_file.flush()
