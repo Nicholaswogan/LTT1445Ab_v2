@@ -46,7 +46,6 @@ def model(x):
     
     # Set bolometric flux
     flux = stars.equilibrium_temperature_inverse(Teq, 0.0)
-    print(f'Flux = {flux:.1} W/m^2')
     c.rad.set_bolometric_flux(flux)
   
     # Set albedos
@@ -97,7 +96,6 @@ def get_gridvals():
     return gridvals, gridnames
 
 NOMINAL_CLIMATE_MODEL, WAVL = initialize_model()
-NOMINAL_CLIMATE_MODEL.verbose = True
 
 def main():
 
@@ -108,9 +106,11 @@ def main():
         gridnames=gridnames, 
         filename='results/LTT1445Ab.h5', 
         progress_filename='results/LTT1445Ab.log',
-        common={'wavl': WAVL}
+        common={'wavl': WAVL},
+        flush_every_n=100,
+        batch_size=10
     )
 
 if __name__ == "__main__":
-    # mpiexec -n 4 python filename.py
+    # mpiexec -n X python filename.py
     main()
