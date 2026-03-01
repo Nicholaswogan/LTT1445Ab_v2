@@ -24,6 +24,8 @@ def initialize_hdf5(filename):
 
 def check_hdf5(filename, gridvals, gridnames, common):
     with h5py.File(filename, 'r') as f:
+        gridshape = tuple(len(v) for v in gridvals)
+        npoints = int(np.prod(gridshape))
 
         if 'gridvals' not in f:
             raise Exception('The following file lacks the group `gridvals`: '+filename)
@@ -44,6 +46,34 @@ def check_hdf5(filename, gridvals, gridnames, common):
         for key, val in common.items():
             if not np.allclose(f['common'][key][:], val):
                 raise Exception('Miss match between the input `common`, and the `common` in '+filename)
+
+        # Validate restart-critical dataset shapes against the current grid definition.
+        if 'inputs' in f:
+            if f['inputs'].shape[0] != npoints:
+                raise Exception(
+                    'Miss match between current grid size and existing `inputs` first dimension in '
+                    + filename
+                )
+            if f['inputs'].shape[1] != len(gridvals):
+                raise Exception(
+                    'Miss match between number of grid dimensions and existing `inputs` second dimension in '
+                    + filename
+                )
+
+        if 'completed' in f:
+            if f['completed'].shape != (npoints,):
+                raise Exception(
+                    'Miss match between current grid size and existing `completed` shape in ' + filename
+                )
+
+        if 'results' in f:
+            for key in f['results'].keys():
+                ds = f['results'][key]
+                if ds.shape[:len(gridshape)] != gridshape:
+                    raise Exception(
+                        "Miss match between current grid shape and existing `results/%s` leading dimensions in %s"
+                        % (key, filename)
+                    )
 
 def ensure_hdf5_layout(f, x, res, grid_shape, gridvals, gridnames, common):
     # Save the gridvals if that has not happened
