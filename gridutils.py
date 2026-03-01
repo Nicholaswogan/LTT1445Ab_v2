@@ -140,6 +140,25 @@ def master(model_func, gridvals, gridnames, filename, progress_filename, common)
     # Get inputs that have not yet been computed
     job_indices = [i for i in range(len(inputs)) if i not in completed_inds]
     job_iter = iter(job_indices)
+
+    # Handle single-rank runs without worker processes.
+    if size == 1:
+        with open(progress_filename, 'w') as log_file:
+            pbar = tqdm(total=len(job_indices), file=log_file, dynamic_ncols=True)
+            for index in job_indices:
+                x = inputs[index]
+                try:
+                    res = model_func(x)
+                    save_result_hdf5(filename, index, x, res, gridshape, gridvals, gridnames, common)
+                    pbar.update(1)
+                    log_file.flush()
+                except Exception as e:
+                    # Intentionally catch Exception (not BaseException) so Ctrl-C/KeyboardInterrupt
+                    # can still stop the run immediately.
+                    print(f"Rank 0 failed on job {index}: {repr(e)}", file=log_file, flush=True)
+                    print(traceback.format_exc(), file=log_file, flush=True)
+            pbar.close()
+        return
     
     # Open progress log file for writing
     with open(progress_filename, 'w') as log_file:
