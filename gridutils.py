@@ -592,7 +592,7 @@ class GridInterpolator():
         self.min_gridvals = np.array([np.min(a) for a in self.gridvals])
         self.max_gridvals = np.array([np.max(a) for a in self.gridvals])
 
-    def make_interpolator(self, key, method='linear', linthresh=1.0, logspace=None):
+    def make_interpolator(self, key, method='linear', linthresh=1.0, logspace=None, bounds_mode='clip'):
         """
         Create an interpolator for a grid parameter.
 
@@ -604,6 +604,11 @@ class GridInterpolator():
         logspace : bool, optional
             If True, interpolation is performed in log10-space. This is useful for 
             quantities that span many orders of magnitude.
+
+        bounds_mode : {'clip', 'error'}, optional
+            Behavior for out-of-bounds interpolation coordinates.
+            - 'clip': clip each coordinate to nearest grid bound (default).
+            - 'error': raise a ValueError describing which dimensions are out of range.
 
         Returns
         -------
@@ -628,15 +633,26 @@ class GridInterpolator():
             untransform = symlog_inverse_func(linthresh)
         else:
             raise ValueError('`method` can not be: '+method)
+        if bounds_mode not in ('clip', 'error'):
+            raise ValueError("`bounds_mode` must be either 'clip' or 'error'.")
 
         # Apply transformation
         data = transform(data)
 
-        # Create the interpolator
-        rgi = interpolate.RegularGridInterpolator(self.gridvals, data)
+        # Create the interpolator.
+        rgi = interpolate.RegularGridInterpolator(
+            self.gridvals,
+            data,
+            bounds_error=True,
+            fill_value=None,
+        )
+        min_vals = self.min_gridvals
+        max_vals = self.max_gridvals
 
         def interp(vals):
-            out = rgi(np.clip(vals, a_min=self.min_gridvals, a_max=self.max_gridvals))
+            if bounds_mode == 'clip':
+                vals = np.clip(vals, a_min=min_vals, a_max=max_vals)
+            out = rgi(vals)
             out = untransform(out)
             return out[0]
 
