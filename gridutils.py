@@ -8,6 +8,7 @@ import numpy as np
 from tqdm import tqdm
 from scipy import interpolate
 import h5py
+import traceback
 
 def get_inputs(gridvals):
     tmp = np.meshgrid(*gridvals, indexing='ij')
@@ -155,14 +156,25 @@ def master(model_func, gridvals, gridnames, filename, progress_filename, common)
         while active_workers > 0:
 
             # Get result form worker
-            index, x, res = comm.recv(source=MPI.ANY_SOURCE, tag=2, status=status)
+            msg = comm.recv(source=MPI.ANY_SOURCE, tag=2, status=status)
             worker_rank = status.Get_source()
 
-            # Save the result
-            save_result_hdf5(filename, index, x, res, gridshape, gridvals, gridnames, common)
-            
-            pbar.update(1)
-            log_file.flush()
+            if msg['status'] == 'ok':
+                index, x, res = msg['index'], msg['x'], msg['res']
+
+                # Save the result
+                save_result_hdf5(filename, index, x, res, gridshape, gridvals, gridnames, common)
+                
+                pbar.update(1)
+                log_file.flush()
+            elif msg['status'] == 'error':
+                index = msg['index']
+                err = msg['error']
+                tb = msg['traceback']
+                print(f"Worker {worker_rank} failed on job {index}: {err}", file=log_file, flush=True)
+                print(tb, file=log_file, flush=True)
+            else:
+                raise RuntimeError(f"Unknown worker message status: {msg['status']}")
 
             # Assign a new job to the worker.
             if not assign_job(comm, worker_rank, serialized_model, job_iter, inputs):
@@ -183,10 +195,22 @@ def worker():
         # Call the function on the inputs
         serialized_model, index, x = data
         model_func = pickle.loads(serialized_model)
-        res = model_func(x)
+        try:
+            res = model_func(x)
+            msg = {'status': 'ok', 'index': index, 'x': x, 'res': res}
+        except Exception as e:
+            # Intentionally catch Exception (not BaseException) so Ctrl-C/KeyboardInterrupt
+            # can still stop the run immediately.
+            msg = {
+                'status': 'error',
+                'index': index,
+                'x': x,
+                'error': repr(e),
+                'traceback': traceback.format_exc(),
+            }
 
-        # Send the results to the master process
-        comm.send((index, x, res), dest=0, tag=2)
+        # Send the result or error to the master process
+        comm.send(msg, dest=0, tag=2)
 
 def make_grid(model_func, gridvals, gridnames, filename, progress_filename, common={}):
     """
