@@ -708,36 +708,82 @@ def resave_with_new_grid(
             newf.create_dataset('completed', shape=(n_new_points,), dtype='bool')
             newf['completed'][:] = False
 
+            # Fill inputs deterministically from the new grid in one contiguous write.
+            newf['inputs'][:] = get_inputs(new_gridvals).astype(old_inputs_dtype, copy=False)
+
+            # Build overlap mapping along each axis once, then copy in bulk.
+            old_overlap_axes = []
+            new_overlap_axes = []
+            for d in range(ndim):
+                old_inds = np.where(axis_index_maps[d] >= 0)[0]
+                old_overlap_axes.append(old_inds)
+                new_overlap_axes.append(axis_index_maps[d][old_inds])
+
+            old_completed_grid = np.zeros(old_gridshape, dtype=bool)
+            if completed_inds.size > 0:
+                old_completed_grid.flat[completed_inds] = True
+
             copied_old_points = 0
-            skipped_old_points = 0
+            skipped_old_points = int(completed_inds.size)
             filled_new_points = 0
             collisions = 0
-            for old_index in completed_inds:
-                old_multi = np.unravel_index(int(old_index), old_gridshape)
-                mapped_inds = [axis_index_maps[d][old_multi[d]] for d in range(ndim)]
-                if any(ind < 0 for ind in mapped_inds):
-                    skipped_old_points += 1
-                    continue
-                new_multi = tuple(mapped_inds)
-                new_lin = np.ravel_multi_index(new_multi, new_gridshape)
-                if newf['completed'][new_lin]:
-                    collisions += 1
-                    raise ValueError(
-                        f'Collision while remapping old completed point {int(old_index)} to '
-                        f'new index {new_lin}. Multiple old points map to the same new point.'
-                    )
 
-                if has_old_inputs:
-                    x = oldf['inputs'][old_index]
+            if all(len(ax) > 0 for ax in old_overlap_axes):
+                def _as_contiguous_slice(idx):
+                    if len(idx) == 0:
+                        return None
+                    if len(idx) == 1:
+                        return slice(int(idx[0]), int(idx[0]) + 1)
+                    diffs = np.diff(idx)
+                    if np.all(diffs == 1):
+                        return slice(int(idx[0]), int(idx[-1]) + 1)
+                    return None
+
+                old_slices = [_as_contiguous_slice(ax) for ax in old_overlap_axes]
+                new_slices = [_as_contiguous_slice(ax) for ax in new_overlap_axes]
+                can_bulk_slice = all(s is not None for s in old_slices) and all(s is not None for s in new_slices)
+
+                if can_bulk_slice:
+                    old_sel = tuple(old_slices)
+                    new_sel = tuple(new_slices)
+
+                    # Copy result datasets in bulk over the contiguous overlapping hyper-rectangle.
+                    for key, _, _ in result_specs:
+                        newf['results'][key][new_sel] = oldf['results'][key][old_sel]
+
+                    # Propagate completion mask only for truly completed old points.
+                    overlap_completed = old_completed_grid[old_sel]
+                    new_completed_grid = np.zeros(new_gridshape, dtype=bool)
+                    new_completed_grid[new_sel] = overlap_completed
+                    newf['completed'][:] = new_completed_grid.reshape(-1)
+
+                    copied_old_points = int(np.count_nonzero(overlap_completed))
+                    skipped_old_points = int(completed_inds.size - copied_old_points)
+                    filled_new_points = copied_old_points
                 else:
-                    x = np.array([old_gridvals[d][old_multi[d]] for d in range(ndim)])
-                newf['inputs'][new_lin] = x
+                    # Fallback for non-contiguous overlap: copy completed points one-by-one.
+                    for old_index in completed_inds:
+                        old_multi = np.unravel_index(int(old_index), old_gridshape)
+                        mapped_inds = [axis_index_maps[d][old_multi[d]] for d in range(ndim)]
+                        if any(ind < 0 for ind in mapped_inds):
+                            continue
 
-                for key, _, _ in result_specs:
-                    newf['results'][key][new_multi] = oldf['results'][key][old_multi]
-                newf['completed'][new_lin] = True
-                copied_old_points += 1
-                filled_new_points += 1
+                        new_multi = tuple(int(i) for i in mapped_inds)
+                        new_lin = np.ravel_multi_index(new_multi, new_gridshape)
+                        if newf['completed'][new_lin]:
+                            collisions += 1
+                            raise ValueError(
+                                f'Collision while remapping old completed point {int(old_index)} to '
+                                f'new index {new_lin}. Multiple old points map to the same new point.'
+                            )
+
+                        for key, _, _ in result_specs:
+                            newf['results'][key][new_multi] = oldf['results'][key][old_multi]
+                        newf['completed'][new_lin] = True
+                        copied_old_points += 1
+
+                    skipped_old_points = int(completed_inds.size - copied_old_points)
+                    filled_new_points = copied_old_points
 
     return {
         'copied_old_points': int(copied_old_points),
