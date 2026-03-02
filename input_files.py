@@ -1,12 +1,11 @@
 import warnings
 import os
+import shutil
 warnings.filterwarnings('ignore')
 THISFILE = os.path.dirname(os.path.abspath(__file__))
 os.environ["picaso_refdata"] = os.path.join(THISFILE, "picasofiles", "reference")
 os.environ["PYSYN_CDBS"] = os.path.join(THISFILE, "picasofiles", "reference", "stellar_grids")
 
-from photochem.extensions import hotrocks
-from picaso import data
 import urllib.parse
 import urllib.request
 import zipfile
@@ -43,17 +42,16 @@ def download_and_unzip(zip_url, destination_folder, zip_filename=None, delete_zi
     return zip_path
 
 def main():
-    hotrocks.download_sphinx_spectra(
-        filename='inputs/sphinx.h5'
-    )
     reference_dir = 'picasofiles/reference'
     reference_installed = os.path.isdir(reference_dir) and bool(os.listdir(reference_dir))
     if not reference_installed:
-        data.get_data(
-            category_download='reference',
-            target_download='default',
-            final_destination_dir=reference_dir
+        download_and_unzip(
+            zip_url='https://github.com/natashabatalha/picaso/archive/refs/tags/v4.0.zip',
+            destination_folder='tmp',
+            delete_zip=True
         )
+        shutil.move(os.path.join('tmp', 'picaso-4.0', 'reference'), 'picasofiles')
+        shutil.rmtree('tmp', ignore_errors=True)
     else:
         print('Picaso reference is already downloaded')
 
@@ -66,6 +64,11 @@ def main():
         )
     else:
         print('Opacity files is already downloaded')
+
+    from photochem.extensions import hotrocks
+    hotrocks.download_sphinx_spectra(
+        filename='inputs/sphinx.h5'
+    )
 
 if __name__ == '__main__':
     main()
