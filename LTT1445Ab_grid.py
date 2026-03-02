@@ -107,7 +107,9 @@ def main():
         progress_filename='results/LTT1445Ab.log',
         common={'wavl': WAVL},
         flush_every_n=100,
-        batch_size=10
+        batch_size=10,
+        compression='lzf',
+        shuffle=True,
     )
 
 if __name__ == "__main__":
