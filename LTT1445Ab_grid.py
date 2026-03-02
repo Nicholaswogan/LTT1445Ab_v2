@@ -1,6 +1,5 @@
 import input_files
 
-import os
 import numpy as np
 from photochem.extensions import hotrocks
 from photochem.utils import stars
