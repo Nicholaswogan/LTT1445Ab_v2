@@ -1,6 +1,4 @@
 from photochem.utils import stars
-import json
-from pathlib import Path
 
 class Star:
     radius : float # relative to the sun
