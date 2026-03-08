@@ -6,6 +6,8 @@ THISFILE = os.path.dirname(os.path.abspath(__file__))
 os.environ["picaso_refdata"] = os.path.join(THISFILE, "picasofiles", "reference")
 os.environ["PYSYN_CDBS"] = os.path.join(THISFILE, "picasofiles", "reference", "stellar_grids")
 
+import planets
+from photochem.utils import stars
 import urllib.parse
 import urllib.request
 import zipfile
@@ -68,6 +70,12 @@ def main():
     from photochem.extensions import hotrocks
     hotrocks.download_sphinx_spectra(
         filename='inputs/sphinx.h5'
+    )
+
+    stars.muscles_spectrum(
+        star_name='GJ176',
+        outputfile='inputs/gj176_scaled_to_ltt1445ab.txt',
+        Teq=planets.LTT1445Ab.Teq
     )
 
 if __name__ == '__main__':
