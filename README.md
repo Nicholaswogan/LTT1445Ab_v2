@@ -24,7 +24,8 @@ mkdir -p codex_reference && cd codex_reference
 for u in \
   https://github.com/Nicholaswogan/photochem/archive/refs/tags/v0.8.2.zip \
   https://github.com/Nicholaswogan/clima/archive/refs/tags/v0.7.4.zip \
-  https://github.com/Nicholaswogan/Equilibrate/archive/refs/tags/v0.2.1.zip
+  https://github.com/Nicholaswogan/Equilibrate/archive/refs/tags/v0.2.1.zip \
+  https://github.com/natashabatalha/picaso/archive/refs/tags/v4.0.zip
 do
   f="$(basename "$u")"
   wget -O "$f" "$u"

@@ -1,6 +1,7 @@
 import os
 import numpy as np
 import h5py
+import pandas as pd
 
 
 KBOLTZ_CGS = 1.380649e-16  # erg/K
@@ -8,23 +9,26 @@ TAU_WAVELENGTH_NM = 9300.0  # 9.3 micron
 
 
 def _default_opacity_file():
-    local = os.path.join(os.path.dirname(__file__), "mie_marsdust.h5")
-    if os.path.exists(local):
-        return local
     try:
         from photochem_clima_data import DATA_DIR
     except Exception as exc:
         raise FileNotFoundError(
-            "Could not find local mie_marsdust.h5 and failed to import "
-            "`photochem_clima_data.DATA_DIR`."
+            "Failed to import `photochem_clima_data.DATA_DIR` to locate Mars dust opacity."
         ) from exc
-    return os.path.join(DATA_DIR, "aerosol_xsections", "marsdust", "mie_marsdust.h5")
+    opacity_file = os.path.join(DATA_DIR, "aerosol_xsections", "marsdust", "mie_marsdust.h5")
+    if not os.path.exists(opacity_file):
+        raise FileNotFoundError(f"Opacity file not found: {opacity_file}")
+    return opacity_file
 
 
 def _interp_loglog_1d(x, y, xq):
-    if np.any(x <= 0.0) or np.any(y <= 0.0) or xq <= 0.0:
+    xq_arr = np.atleast_1d(np.asarray(xq, dtype=float))
+    if np.any(x <= 0.0) or np.any(y <= 0.0) or np.any(xq_arr <= 0.0):
         raise ValueError("Log-log interpolation requires positive x, y, and query value.")
-    return float(np.exp(np.interp(np.log(xq), np.log(x), np.log(y))))
+    out = np.exp(np.interp(np.log(xq_arr), np.log(x), np.log(y)))
+    if np.isscalar(xq):
+        return float(out[0])
+    return out
 
 
 def _qext_at_radius_and_wavelength(wavelengths_nm, radii_um, qext, radius_um, wavelength_nm):
@@ -64,7 +68,6 @@ def make_dust_profile(
     dz,
     tau_9_3,
     dust_radius,
-    opacity_file=None,
 ):
     """Build a constant-radius dust profile and normalize it to a target tau at 9.3 micron.
 
@@ -80,9 +83,6 @@ def make_dust_profile(
         Target optical depth at 9.3 micron.
     dust_radius : float
         Constant particle radius [cm].
-    opacity_file : str, optional
-        Path to `mie_marsdust.h5`. If None, defaults to local `mie_marsdust.h5` in this
-        directory, otherwise `DATA_DIR/aerosol_xsections/marsdust/mie_marsdust.h5`.
 
     Returns
     -------
@@ -114,10 +114,7 @@ def make_dust_profile(
     if not np.isfinite(dust_radius) or dust_radius <= 0.0:
         raise ValueError("dust_radius must be finite and > 0.")
 
-    if opacity_file is None:
-        opacity_file = _default_opacity_file()
-    if not os.path.exists(opacity_file):
-        raise FileNotFoundError(f"Opacity file not found: {opacity_file}")
+    opacity_file = _default_opacity_file()
 
     # Gas profile and provisional dust-shape profile (n_raw ∝ n_gas).
     n_gas = pressure / (KBOLTZ_CGS * temperature)
@@ -161,6 +158,342 @@ def make_dust_profile(
 
     return pressure.copy(), n_dust, r_dust
 
+
+def _load_marsdust_optics():
+    opacity_file = _default_opacity_file()
+    with h5py.File(opacity_file, "r") as f:
+        wavelengths_nm = np.asarray(f["wavelengths"][:], dtype=float).ravel()
+        radii_um = np.asarray(f["radii"][:], dtype=float).ravel()
+        qext = np.asarray(f["qext"][:], dtype=float)
+        w0 = np.asarray(f["w0"][:], dtype=float)
+        g0 = np.asarray(f["g0"][:], dtype=float)
+
+    if wavelengths_nm.size < 2 or radii_um.size < 2:
+        raise ValueError("Opacity table must contain at least two wavelength and radius points.")
+    if np.any(wavelengths_nm <= 0.0) or np.any(radii_um <= 0.0):
+        raise ValueError("Opacity wavelengths and radii must be strictly positive.")
+    if np.any(qext <= 0.0):
+        raise ValueError("qext must be strictly positive for log-log interpolation.")
+
+    expected_wr = (wavelengths_nm.size, radii_um.size)
+    expected_rw = (radii_um.size, wavelengths_nm.size)
+
+    def _to_wr(arr, name):
+        if arr.shape == expected_wr:
+            return arr
+        if arr.shape == expected_rw:
+            return arr.T
+        raise ValueError(
+            f"Unexpected {name} shape {arr.shape}. Expected {expected_wr} or {expected_rw}."
+        )
+
+    qext = _to_wr(qext, "qext")
+    w0 = _to_wr(w0, "w0")
+    g0 = _to_wr(g0, "g0")
+
+    return wavelengths_nm, radii_um, qext, w0, g0
+
+
+def _interp_linear_over_logx(x, y, xq):
+    if np.any(x <= 0.0) or np.any(xq <= 0.0):
+        raise ValueError("Interpolation in log-x requires positive x and query values.")
+    return np.interp(np.log(xq), np.log(x), y)
+
+
+def _interp_optics_at_radius_and_wavelengths(
+    wavelengths_nm,
+    radii_um,
+    qext_wr,
+    w0_wr,
+    g0_wr,
+    radius_um,
+    wavelength_nm,
+):
+    if np.any(wavelength_nm < wavelengths_nm.min()) or np.any(wavelength_nm > wavelengths_nm.max()):
+        raise ValueError(
+            f"Requested wavelength range [{wavelength_nm.min():.3f}, {wavelength_nm.max():.3f}] nm "
+            f"is outside opacity table range [{wavelengths_nm.min():.3f}, {wavelengths_nm.max():.3f}] nm."
+        )
+    if radius_um < radii_um.min() or radius_um > radii_um.max():
+        raise ValueError(
+            f"Requested dust radius {radius_um:.6g} um is outside opacity table range "
+            f"[{radii_um.min():.6g}, {radii_um.max():.6g}] um."
+        )
+
+    nr = radii_um.size
+    nw = wavelength_nm.size
+
+    # Interpolate in wavelength at every radius.
+    qext_r_w = np.empty((nr, nw), dtype=float)
+    w0_r_w = np.empty((nr, nw), dtype=float)
+    g0_r_w = np.empty((nr, nw), dtype=float)
+    for i in range(nr):
+        qext_r_w[i, :] = _interp_loglog_1d(wavelengths_nm, qext_wr[:, i], wavelength_nm)
+        w0_r_w[i, :] = _interp_linear_over_logx(wavelengths_nm, w0_wr[:, i], wavelength_nm)
+        g0_r_w[i, :] = _interp_linear_over_logx(wavelengths_nm, g0_wr[:, i], wavelength_nm)
+
+    # Interpolate in radius at every wavelength.
+    qext_out = np.empty(nw, dtype=float)
+    w0_out = np.empty(nw, dtype=float)
+    g0_out = np.empty(nw, dtype=float)
+    lr = np.log(radii_um)
+    lrq = np.log(radius_um)
+    for k in range(nw):
+        qext_out[k] = _interp_loglog_1d(radii_um, qext_r_w[:, k], radius_um)
+        w0_out[k] = np.interp(lrq, lr, w0_r_w[:, k])
+        g0_out[k] = np.interp(lrq, lr, g0_r_w[:, k])
+
+    w0_out = np.clip(w0_out, 0.0, 1.0)
+    g0_out = np.clip(g0_out, 0.0, 1.0)
+    return qext_out, w0_out, g0_out
+
+
+def build_picaso_cloud_df(
+    pressure_level_bar,
+    dz_layer_cm,
+    n_dust_layer,
+    r_dust_layer_cm,
+    wno_cm1,
+):
+    """Build PICASO-compatible cloud dataframe from a dust profile.
+
+    Parameters
+    ----------
+    pressure_level_bar : array-like
+        Layer pressures in bars (length nlayer).
+    dz_layer_cm : array-like
+        Layer thicknesses in cm (length nlayer).
+    n_dust_layer : array-like
+        Dust particle number density in particles/cm^3 (length nlayer).
+    r_dust_layer_cm : array-like
+        Dust particle radius in cm (length nlayer).
+    wno_cm1 : array-like
+        PICASO wavenumber grid in cm^-1 (length nwave).
+
+    Returns
+    -------
+    pandas.DataFrame
+        Dataframe with columns required by `case.clouds(df=...)`:
+        `pressure`, `wavenumber`, `opd`, `w0`, `g0`.
+    """
+    pressure_level_bar = np.asarray(pressure_level_bar, dtype=float).ravel()
+    dz_layer_cm = np.asarray(dz_layer_cm, dtype=float).ravel()
+    n_dust_layer = np.asarray(n_dust_layer, dtype=float).ravel()
+    r_dust_layer_cm = np.asarray(r_dust_layer_cm, dtype=float).ravel()
+    wno_cm1 = np.asarray(wno_cm1, dtype=float).ravel()
+
+    nlayer = pressure_level_bar.size
+    if nlayer == 0:
+        raise ValueError("Layer arrays must be non-empty.")
+    if not (dz_layer_cm.size == nlayer == n_dust_layer.size == r_dust_layer_cm.size):
+        raise ValueError("pressure_level_bar, dz_layer_cm, n_dust_layer, and r_dust_layer_cm must match in length.")
+    if wno_cm1.size == 0:
+        raise ValueError("wno_cm1 must be non-empty.")
+    if np.any(~np.isfinite(pressure_level_bar)) or np.any(~np.isfinite(dz_layer_cm)) or np.any(~np.isfinite(n_dust_layer)) or np.any(~np.isfinite(r_dust_layer_cm)) or np.any(~np.isfinite(wno_cm1)):
+        raise ValueError("All inputs must be finite.")
+    if np.any(pressure_level_bar <= 0.0):
+        raise ValueError("pressure_level_bar must be > 0.")
+    if np.any(dz_layer_cm <= 0.0):
+        raise ValueError("dz_layer_cm must be > 0.")
+    if np.any(n_dust_layer < 0.0):
+        raise ValueError("n_dust_layer must be >= 0.")
+    if np.any(r_dust_layer_cm <= 0.0):
+        raise ValueError("r_dust_layer_cm must be > 0.")
+    if np.any(wno_cm1 <= 0.0):
+        raise ValueError("wno_cm1 must be > 0.")
+
+    wavelengths_nm, radii_um, qext_wr, w0_wr, g0_wr = _load_marsdust_optics()
+    wavelength_query_nm = 1.0e7 / wno_cm1
+    radius_layer_um = r_dust_layer_cm * 1.0e4
+
+    if np.any(wavelength_query_nm < wavelengths_nm.min()) or np.any(wavelength_query_nm > wavelengths_nm.max()):
+        raise ValueError(
+            f"Requested wavelength range [{wavelength_query_nm.min():.3f}, {wavelength_query_nm.max():.3f}] nm "
+            f"is outside opacity table range [{wavelengths_nm.min():.3f}, {wavelengths_nm.max():.3f}] nm."
+        )
+    if np.any(radius_layer_um < radii_um.min()) or np.any(radius_layer_um > radii_um.max()):
+        raise ValueError(
+            f"Requested dust radius range [{radius_layer_um.min():.6g}, {radius_layer_um.max():.6g}] um "
+            f"is outside opacity table range [{radii_um.min():.6g}, {radii_um.max():.6g}] um."
+        )
+
+    nwave = wno_cm1.size
+    nr = radii_um.size
+
+    # First interpolate each table radius onto the PICASO wavelength grid.
+    qext_r_w = np.empty((nr, nwave), dtype=float)
+    w0_r_w = np.empty((nr, nwave), dtype=float)
+    g0_r_w = np.empty((nr, nwave), dtype=float)
+    for i in range(nr):
+        qext_r_w[i, :] = _interp_loglog_1d(wavelengths_nm, qext_wr[:, i], wavelength_query_nm)
+        w0_r_w[i, :] = _interp_linear_over_logx(wavelengths_nm, w0_wr[:, i], wavelength_query_nm)
+        g0_r_w[i, :] = _interp_linear_over_logx(wavelengths_nm, g0_wr[:, i], wavelength_query_nm)
+
+    # Then interpolate in radius for all layers in bulk.
+    lr = np.log(radii_um)
+    lrq = np.log(radius_layer_um)
+    idx_hi = np.searchsorted(lr, lrq, side="right")
+    idx_hi = np.clip(idx_hi, 1, nr - 1)
+    idx_lo = idx_hi - 1
+    frac = (lrq - lr[idx_lo]) / (lr[idx_hi] - lr[idx_lo])
+    frac2d = frac[:, None]
+
+    qext_lo = qext_r_w[idx_lo, :]
+    qext_hi = qext_r_w[idx_hi, :]
+    qext = np.exp((1.0 - frac2d) * np.log(qext_lo) + frac2d * np.log(qext_hi))
+
+    w0_lo = w0_r_w[idx_lo, :]
+    w0_hi = w0_r_w[idx_hi, :]
+    w0 = (1.0 - frac2d) * w0_lo + frac2d * w0_hi
+
+    g0_lo = g0_r_w[idx_lo, :]
+    g0_hi = g0_r_w[idx_hi, :]
+    g0 = (1.0 - frac2d) * g0_lo + frac2d * g0_hi
+
+    w0 = np.clip(w0, 0.0, 1.0)
+    g0 = np.clip(g0, 0.0, 1.0)
+
+    sigma_ext = qext * (np.pi * (r_dust_layer_cm[:, None] ** 2))
+    opd = sigma_ext * (n_dust_layer[:, None] * dz_layer_cm[:, None])
+
+    pressure_col = np.repeat(pressure_level_bar, nwave)
+    wno_col = np.tile(wno_cm1, nlayer)
+    df = pd.DataFrame(
+        {
+            "pressure": pressure_col,
+            "wavenumber": wno_col,
+            "opd": opd.reshape(-1),
+            "w0": w0.reshape(-1),
+            "g0": g0.reshape(-1),
+        }
+    ).sort_values(["pressure", "wavenumber"]).reset_index(drop=True)
+
+    expected_rows = nlayer * nwave
+    if df.shape[0] != expected_rows:
+        raise ValueError(f"Cloud dataframe row count {df.shape[0]} does not match expected {expected_rows}.")
+
+    return df
+
+
+def apply_picaso_dust_clouds(
+    c,
+    particle_index=0,
+    particle_name=None,
+):
+    """Apply dust clouds to an initialized hotrocks PICASO case.
+
+    Parameters
+    ----------
+    c : object
+        Hotrocks climate object with initialized `ptherm` (`initialize_picaso_from_clima` called).
+    particle_index : int, optional
+        Which particle to use from `c.pdensities/c.pradii` if multiple are present.
+    particle_name : str, optional
+        Alternative to `particle_index`. If given, selects that particle by name.
+
+    Returns
+    -------
+    pandas.DataFrame
+        PICASO cloud dataframe that was applied to `c.ptherm.case`.
+    """
+    if not hasattr(c, "ptherm") or c.ptherm is None:
+        raise ValueError("PICASO is not initialized. Call `c.initialize_picaso_from_clima(...)` first.")
+    if not hasattr(c, "make_picaso_atm"):
+        raise ValueError("Input object must provide `make_picaso_atm()`.")
+    if not hasattr(c, "pdensities") or not hasattr(c, "pradii"):
+        raise ValueError("Input object must provide `pdensities` and `pradii`.")
+    if not hasattr(c, "P") or not hasattr(c, "P_surf") or not hasattr(c, "dz"):
+        raise ValueError("Input object must provide `P`, `P_surf`, and `dz`.")
+
+    pdens = np.asarray(c.pdensities, dtype=float)
+    pradii = np.asarray(c.pradii, dtype=float)
+    if pdens.ndim != 2 or pradii.ndim != 2:
+        raise ValueError("`c.pdensities` and `c.pradii` must be 2D arrays (nz,np).")
+    if pdens.shape != pradii.shape:
+        raise ValueError("`c.pdensities` and `c.pradii` must have identical shapes.")
+    if pdens.shape[1] < 1:
+        raise ValueError("No particles found in `c.pdensities`.")
+
+    if particle_name is not None:
+        if not hasattr(c, "particle_names"):
+            raise ValueError("`particle_name` was provided, but object has no `particle_names`.")
+        names = list(c.particle_names)
+        if particle_name not in names:
+            raise ValueError(f"particle_name `{particle_name}` not found. Available: {names}")
+        ip = names.index(particle_name)
+    else:
+        ip = int(particle_index)
+    if ip < 0 or ip >= pdens.shape[1]:
+        raise ValueError(f"particle_index {ip} is out of bounds for np={pdens.shape[1]}.")
+
+    P_internal = np.asarray(c.P, dtype=float).ravel()
+    dz_layer_cm = np.asarray(c.dz, dtype=float).ravel()
+    if P_internal.size < 1:
+        raise ValueError("`c.P` must be non-empty.")
+    if dz_layer_cm.size != P_internal.size:
+        raise ValueError("Expected `len(c.dz) == len(c.P)`.")
+
+    # Build level arrays matching the PICASO atmosphere levels used by make_picaso_atm:
+    # [surface, internal_levels...]. Dust at the surface is set equal to first internal level.
+    pressure_level_dyn = np.append(float(c.P_surf), P_internal)
+    n_dust_level = np.append(pdens[0, ip], pdens[:, ip])
+    r_dust_level_cm = np.append(pradii[0, ip], pradii[:, ip])
+
+    nlevel = pressure_level_dyn.size
+    if nlevel < 2:
+        raise ValueError("pressure_level_dyn must have at least two levels.")
+    if not (n_dust_level.size == nlevel and r_dust_level_cm.size == nlevel):
+        raise ValueError("n_dust_level and r_dust_level_cm must match pressure_level_dyn length.")
+    if dz_layer_cm.size != (nlevel - 1):
+        raise ValueError("dz_layer_cm must have length nlevel-1.")
+    if np.any(pressure_level_dyn <= 0.0):
+        raise ValueError("pressure_level_dyn must be > 0.")
+    if np.any(r_dust_level_cm <= 0.0):
+        raise ValueError("r_dust_level_cm must be > 0.")
+    if np.any(n_dust_level < 0.0):
+        raise ValueError("n_dust_level must be >= 0.")
+    if np.any(dz_layer_cm <= 0.0):
+        raise ValueError("dz_layer_cm must be > 0.")
+
+    # Ensure PICASO has atmosphere loaded so `nlevel` is known before clouds(df=...).
+    atm = c.make_picaso_atm()
+    c.ptherm.case.atmosphere(df=atm, verbose=False)
+
+    pressure_layer_bar = np.sqrt(pressure_level_dyn[:-1] * pressure_level_dyn[1:]) / 1.0e6
+    n_dust_layer = 0.5 * (n_dust_level[:-1] + n_dust_level[1:])
+    r_dust_layer_cm = np.sqrt(r_dust_level_cm[:-1] * r_dust_level_cm[1:])
+
+    wno_cm1 = np.asarray(c.ptherm.opa.wno, dtype=float)
+    cloud_df = build_picaso_cloud_df(
+        pressure_level_bar=pressure_layer_bar,
+        dz_layer_cm=dz_layer_cm,
+        n_dust_layer=n_dust_layer,
+        r_dust_layer_cm=r_dust_layer_cm,
+        wno_cm1=wno_cm1,
+    )
+    c.ptherm.case.clouds(df=cloud_df)
+    return cloud_df
+
+
+def fpfs_picaso_with_dust(
+    c,
+    particle_index=0,
+    particle_name=None,
+    R=100,
+    wavl=None,
+    atmosphere_kwargs=None,
+    **kwargs,
+):
+    """Apply dust clouds and compute thermal emission with PICASO."""
+    if atmosphere_kwargs is None:
+        atmosphere_kwargs = {}
+    apply_picaso_dust_clouds(
+        c=c,
+        particle_index=particle_index,
+        particle_name=particle_name,
+    )
+    return c.fpfs_picaso(R=R, wavl=wavl, atmosphere_kwargs=atmosphere_kwargs, **kwargs)
+
 import LTT1445Ab_grid
 import planets
 from fixedpoint import RobustFixedPointSolver
@@ -187,6 +520,10 @@ class DustSolver():
         )
         c.verbose = False
         c.P_top = 1.0
+
+        # Initialize PICASO
+        filename_db = "picasofiles/opacities_photochem_0.1_250.0_R15000.db"
+        c.initialize_picaso_from_clima(filename_db, opannection_kwargs={'wave_range': [4.0, 25.0]})
 
         self.c = c
 
@@ -242,7 +579,7 @@ class DustSolver():
         c.set_particle_density_and_radii(P, n_dust, r_dust)
 
         # Run climate
-        converged = c.RCE(P_i, c.T_surf, c.T, c.convecting_with_below)
+        converged = c.RCE_robust(P_i)
         assert converged
 
         # results

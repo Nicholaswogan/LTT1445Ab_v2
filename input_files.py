@@ -6,6 +6,8 @@ THISFILE = os.path.dirname(os.path.abspath(__file__))
 os.environ["picaso_refdata"] = os.path.join(THISFILE, "picasofiles", "reference")
 os.environ["PYSYN_CDBS"] = os.path.join(THISFILE, "picasofiles", "reference", "stellar_grids")
 
+from photochem.utils import species_file_for_climate
+
 import planets
 from photochem.utils import stars
 import urllib.parse
@@ -43,6 +45,22 @@ def download_and_unzip(zip_url, destination_folder, zip_filename=None, delete_zi
 
     return zip_path
 
+def get_uv_spectra():
+    stars.muscles_spectrum(
+        star_name='GJ176',
+        outputfile='inputs/gj176_scaled_to_ltt1445ab.txt',
+        Teq=planets.LTT1445Ab.Teq
+    )
+
+def custom_inputs():
+
+    species_file_for_climate(
+        filename='inputs/species_dust.yaml',
+        species=['H2O', 'CO2', 'O2', 'SO2'],
+        condensates=['H2O', 'CO2'],
+        particles=[{'name': 'Dust', 'composition': {'C': 1}}],
+    )
+
 def main():
     reference_dir = 'picasofiles/reference'
     reference_installed = os.path.isdir(reference_dir) and bool(os.listdir(reference_dir))
@@ -72,11 +90,9 @@ def main():
         filename='inputs/sphinx.h5'
     )
 
-    stars.muscles_spectrum(
-        star_name='GJ176',
-        outputfile='inputs/gj176_scaled_to_ltt1445ab.txt',
-        Teq=planets.LTT1445Ab.Teq
-    )
+    get_uv_spectra()
+
+    custom_inputs()
 
 if __name__ == '__main__':
     main()
