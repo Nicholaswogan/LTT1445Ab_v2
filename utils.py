@@ -1,4 +1,5 @@
 import numpy as np
+import re
 
 def make_lrs_data(filename):
     wv1, wv2, wv, fpfs, fpfs_err = np.loadtxt(filename,skiprows=1).T
@@ -40,3 +41,16 @@ def make_F1500W_data(fpfs, ntrans, err_one_transit=None):
     data_dict['wv_err'] = wv_err
 
     return data_dict
+
+def species_to_latex(sp):
+    sp1 = re.sub(r'([0-9]+)', r"_\1", sp)
+    sp1 = r'$\mathrm{'+sp1+'}$'
+    if sp == 'O1D':
+        sp1 = r'$\mathrm{O(^1D)}$'
+    elif sp == 'N2D':
+        sp1 = r'$\mathrm{N(^2D)}$'
+    elif sp == '1CH2':
+        sp1 = r'$\mathrm{^1CH_2}$'
+    elif sp == 'H2SO4aer':
+        sp1 = r'H$_2$SO$_2$ cloud'
+    return sp1
