@@ -161,4 +161,112 @@ def make_dust_profile(
 
     return pressure.copy(), n_dust, r_dust
 
+import LTT1445Ab_grid
+import planets
+from fixedpoint import RobustFixedPointSolver
+from photochem.extensions import hotrocks
 
+class DustSolver():
+
+    def __init__(self):
+
+        pl = planets.LTT1445Ab
+        st = planets.LTT1445A
+        c = hotrocks.AdiabatClimateThermalEmission(
+            Teq=pl.Teq,
+            M_planet=pl.mass,
+            R_planet=pl.radius,
+            R_star=st.radius,
+            Teff=st.Teff,
+            metal=st.metal,
+            logg=st.logg,
+            catdir='sphinx',
+            sphinx_filename='inputs/sphinx.h5',
+            species_file='inputs/species_dust.yaml',
+            opacities_file='inputs/opacities_dust.yaml'
+        )
+        c.verbose = False
+        c.P_top = 1.0
+
+        self.c = c
+
+    def compute_P_grid(self, P_surf):
+        """Construct the pressure grid used for equilibrium calculations.
+
+        Parameters
+        ----------
+        P_surf : float
+            Surface pressure in dyn/cm^2.
+
+        Returns
+        -------
+        ndarray
+            1D pressure grid in dyn/cm^2, including the surface level and
+            extending to ``self.P_top``.
+        """
+        c = self.c
+        P_top = c.P_top
+        nz = len(c.T)
+        P_grid = np.logspace(np.log10(P_surf), np.log10(P_top), 2*nz+1)
+        P_grid = np.append(P_grid[0], P_grid[1::2])
+        return P_grid
+
+    def g_eval(self, x, P_i, tau_9_3, dust_radius):
+
+        c = self.c
+
+        # Unpack
+        T = x[:]
+
+        # Compute P and dz
+        P = self.compute_P_grid(np.sum(P_i))
+        f_i = np.empty((len(P),len(c.species_names)))
+        f_i_ = P_i/np.sum(P_i)
+        for i,sp in enumerate(c.species_names):
+            f_i[:,i] = f_i_[i]
+        c.make_profile_dry(P, T, f_i)
+        dz = np.append(c.dz[0], c.dz)
+
+        # Make dust profile
+        _, n_dust, r_dust = make_dust_profile(
+            pressure=P,
+            temperature=T,
+            dz=dz,
+            tau_9_3=tau_9_3,
+            dust_radius=dust_radius,
+        )
+        n_dust = n_dust.reshape(len(n_dust), len(c.particle_names))
+        r_dust = r_dust.reshape(len(r_dust), len(c.particle_names))
+
+        # set dust profile
+        c.set_particle_density_and_radii(P, n_dust, r_dust)
+
+        # Run climate
+        converged = c.RCE(P_i, c.T_surf, c.T, c.convecting_with_below)
+        assert converged
+
+        # results
+        result = np.append(c.T_surf, c.T)
+        return result
+    
+    def solve(self, P_i, tau_9_3, dust_radius, tol=1, max_tol=1, **kwargs): 
+
+        def g(x):
+            return self.g_eval(x, P_i, tau_9_3, dust_radius)
+
+        self.c.set_particle_density_and_radii(np.array([1.0]), np.array([[0.0]]), np.array([[1.0e-4]]))
+        converged = self.c.RCE_robust(P_i)
+        assert converged
+
+        guess = np.append(self.c.T_surf, self.c.T)
+
+        solver = RobustFixedPointSolver(
+            g=g,
+            x0=guess,
+            tol=tol,
+            max_tol=max_tol,
+            **kwargs
+        )
+        result = solver.solve()
+        return result
+    
