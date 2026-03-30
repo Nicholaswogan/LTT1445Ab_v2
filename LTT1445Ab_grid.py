@@ -9,7 +9,7 @@ _ = threadpool_limits(limits=1)
 import planets
 from gridutils import make_grid
 
-def initialize_model(species=None):
+def initialize_model(species=None, tidally_locked_dayside=True):
 
     # Make climate model
     pl = planets.LTT1445Ab
@@ -28,6 +28,7 @@ def initialize_model(species=None):
     )
     c.verbose = False
     c.P_top = 1.0
+    c.tidally_locked_dayside = tidally_locked_dayside
 
     # Initialize PICASO
     filename_db = "picasofiles/opacities_photochem_0.1_250.0_R15000.db"
@@ -83,6 +84,51 @@ def model(x):
 
     return result
 
+def model_hot(x):
+    log10PH2O, log10PCO2, log10PO2, log10PSO2, albedo, Teq = x
+
+    # Unpack global
+    c = HOT_CLIMATE_MODEL
+
+    # No heat-redistribution
+    f_term = 2/3
+    
+    # Set bolometric flux
+    flux = stars.equilibrium_temperature_inverse(Teq, 0.0)
+    c.rad.set_bolometric_flux(flux*(4*f_term))
+
+    # Set albedos
+    c.set_custom_albedo(np.array([1.0]), np.array([albedo]))
+
+    # Atmospheric composition
+    P_i = np.ones(len(c.species_names))*1e-15
+    P_i[c.species_names.index('H2O')] = 10.0**log10PH2O
+    P_i[c.species_names.index('CO2')] = 10.0**log10PCO2
+    P_i[c.species_names.index('O2')] = 10.0**log10PO2
+    P_i[c.species_names.index('SO2')] = 10.0**log10PSO2
+    P_i *= 1.0e6 # convert to dynes/cm^2
+
+    # Compute climate
+    converged = c.RCE_robust(P_i)
+
+    # Save the P-T profile
+    P = np.append(c.P_surf,c.P)
+    T = np.append(c.T_surf,c.T)
+
+    # Get emission spectra
+    _, fp, _ = c.fpfs_picaso(wavl=WAVL)
+
+    # Save
+    result = {
+        'converged': np.array(converged),
+        'x': x.astype(np.float32),
+        'P': P.astype(np.float32),
+        'T': T.astype(np.float32),
+        'fp': fp.astype(np.float32)
+    }
+
+    return result
+
 def get_gridvals():
     log10PH2O = np.arange(-7.0, 2.01, 1.0)
     log10PCO2 = np.arange(-7.0, 2.01, 0.5)
@@ -95,7 +141,19 @@ def get_gridvals():
     gridnames = ['log10PH2O','log10PCO2','log10PO2','log10PSO2','chi','albedo','Teq']
     return gridvals, gridnames
 
+def get_gridvals_hot():
+    log10PH2O = np.arange(-7.0, 2.01, 1.0)
+    log10PCO2 = np.arange(-7.0, 2.01, 0.5)
+    log10PO2 = np.arange(-5.0, 2.01, 1.0)
+    log10PSO2 = np.arange(-7.0, 2.01, 1.0)
+    albedo = np.arange(0, 0.401, 0.1)
+    Teq = np.array([431.0 - 23.0*2.0, 431.0, 431.0 + 23.0*2.0]) # +/- 2 sigma uncertainty
+    gridvals = (log10PH2O, log10PCO2, log10PO2, log10PSO2, albedo, Teq)
+    gridnames = ['log10PH2O','log10PCO2','log10PO2','log10PSO2','albedo','Teq']
+    return gridvals, gridnames
+
 NOMINAL_CLIMATE_MODEL, WAVL = initialize_model()
+HOT_CLIMATE_MODEL, WAVL = initialize_model(tidally_locked_dayside=False)
 
 def main():
 
@@ -113,6 +171,23 @@ def main():
         shuffle=True,
     )
 
+def main_hot():
+
+    gridvals, gridnames = get_gridvals_hot()
+    make_grid(
+        model_func=model_hot, 
+        gridvals=gridvals,
+        gridnames=gridnames, 
+        filename='results/LTT1445Ab_hot.h5', 
+        progress_filename='results/LTT1445Ab_hot.log',
+        common={'wavl': WAVL},
+        flush_every_n=100,
+        batch_size=10,
+        compression='lzf',
+        shuffle=True,
+    )
+
 if __name__ == "__main__":
     # mpiexec -n X python filename.py
-    main()
+    # main()
+    main_hot()
