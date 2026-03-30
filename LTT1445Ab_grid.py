@@ -9,7 +9,7 @@ _ = threadpool_limits(limits=1)
 import planets
 from gridutils import make_grid
 
-def initialize_model():
+def initialize_model(species=None):
 
     # Make climate model
     pl = planets.LTT1445Ab
@@ -23,7 +23,8 @@ def initialize_model():
         metal=st.metal,
         logg=st.logg,
         catdir='sphinx',
-        sphinx_filename='inputs/sphinx.h5'
+        sphinx_filename='inputs/sphinx.h5',
+        species=species
     )
     c.verbose = False
     c.P_top = 1.0

@@ -1,4 +1,5 @@
 import os
+import re
 import numpy as np
 import h5py
 import pandas as pd
@@ -6,6 +7,27 @@ import pandas as pd
 
 KBOLTZ_CGS = 1.380649e-16  # erg/K
 TAU_WAVELENGTH_NM = 9300.0  # 9.3 micron
+N_AVO = 6.02214076e23  # 1/mol
+AREA_OF_MOLECULE = 6.0e-15  # cm^2
+ATOMIC_WEIGHTS = {
+    "H": 1.00794,
+    "He": 4.002602,
+    "C": 12.0107,
+    "N": 14.0067,
+    "O": 15.9994,
+    "Na": 22.98976928,
+    "Mg": 24.3050,
+    "Al": 26.9815385,
+    "Si": 28.0855,
+    "P": 30.973761998,
+    "S": 32.065,
+    "Cl": 35.453,
+    "K": 39.0983,
+    "Ca": 40.078,
+    "Ti": 47.867,
+    "V": 50.9415,
+    "Fe": 55.845,
+}
 
 
 def _default_opacity_file():
@@ -157,6 +179,355 @@ def make_dust_profile(
         n_dust = n_raw * (tau_9_3 / tau_raw)
 
     return pressure.copy(), n_dust, r_dust
+
+
+def _species_mass_from_formula(species_name):
+    tokens = re.findall(r"([A-Z][a-z]?)(\d*)", species_name)
+    if not tokens:
+        raise ValueError(f"Could not parse molecular formula for species `{species_name}`.")
+    consumed = "".join(atom + count for atom, count in tokens)
+    if consumed != species_name:
+        raise ValueError(f"Unsupported species formula `{species_name}`.")
+
+    mass = 0.0
+    for atom, count_str in tokens:
+        if atom not in ATOMIC_WEIGHTS:
+            raise ValueError(f"Unsupported atom `{atom}` in species `{species_name}`.")
+        count = int(count_str) if count_str else 1
+        mass += ATOMIC_WEIGHTS[atom] * count
+    return mass
+
+
+def _species_masses_from_names(species_names):
+    return np.array([_species_mass_from_formula(name) for name in species_names], dtype=float)
+
+
+def _dynamic_viscosity_air(T):
+    T = np.asarray(T, dtype=float)
+    if np.any(T <= 0.0):
+        raise ValueError("Temperature must be > 0 for dynamic viscosity.")
+    eta0 = 1.716e-5
+    T0 = 273.15
+    S = 111.0
+    unit_conversion = 10.0
+    return unit_conversion * eta0 * (T / T0) ** 1.5 * (T0 + S) / (T + S)
+
+
+def _slip_correction_factor(particle_radius, number_density):
+    particle_radius = np.asarray(particle_radius, dtype=float)
+    number_density = np.asarray(number_density, dtype=float)
+    if np.any(particle_radius <= 0.0) or np.any(number_density <= 0.0):
+        raise ValueError("particle_radius and number_density must be > 0 for slip correction.")
+    lambda_mfp = 1.0 / (number_density * AREA_OF_MOLECULE)
+    return 1.0 + (lambda_mfp / particle_radius) * (
+        1.257 + 0.4 * np.exp((-1.1 * particle_radius) / lambda_mfp)
+    )
+
+
+def _fall_velocity(grav, particle_radius, particle_density, air_density, viscosity):
+    return (2.0 / 9.0) * grav * particle_radius ** 2 * (particle_density - air_density) / viscosity
+
+
+def _gas_number_density(pressure, temperature):
+    return pressure / (KBOLTZ_CGS * temperature)
+
+
+def _mean_molecular_weight(mix, species_masses):
+    mix = np.asarray(mix, dtype=float)
+    species_masses = np.asarray(species_masses, dtype=float).ravel()
+    if mix.ndim != 2:
+        raise ValueError("mix must be a 2D array with shape (nlevel, nspecies).")
+    if mix.shape[1] != species_masses.size:
+        raise ValueError("mix and species_masses have incompatible shapes.")
+    return np.sum(mix * species_masses[None, :], axis=1)
+
+
+def _gas_mass_density(number_density, mubar):
+    return number_density * (mubar / N_AVO)
+
+
+def _dust_particle_mass(dust_radius, dust_density):
+    return (4.0 / 3.0) * np.pi * dust_radius ** 3 * dust_density
+
+
+def _tau_9p3_from_profile(n_dust, dz, dust_radius):
+    opacity_file = _default_opacity_file()
+    with h5py.File(opacity_file, "r") as f:
+        wavelengths_nm = np.asarray(f["wavelengths"][:], dtype=float).ravel()
+        radii_um = np.asarray(f["radii"][:], dtype=float).ravel()
+        qext = np.asarray(f["qext"][:], dtype=float)
+    radius_um = dust_radius * 1.0e4
+    qext_9p3 = _qext_at_radius_and_wavelength(
+        wavelengths_nm=wavelengths_nm,
+        radii_um=radii_um,
+        qext=qext,
+        radius_um=radius_um,
+        wavelength_nm=TAU_WAVELENGTH_NM,
+    )
+    sigma_ext = qext_9p3 * np.pi * dust_radius ** 2
+    return float(np.sum(n_dust * sigma_ext * dz))
+
+
+def compute_lofted_dust_diagnostics(
+    pressure,
+    temperature,
+    dz,
+    mix,
+    species_masses,
+    n_dust,
+    dust_radius,
+    dust_density,
+):
+    pressure = np.asarray(pressure, dtype=float).ravel()
+    temperature = np.asarray(temperature, dtype=float).ravel()
+    dz = np.asarray(dz, dtype=float).ravel()
+    n_dust = np.asarray(n_dust, dtype=float).ravel()
+    mix = np.asarray(mix, dtype=float)
+    species_masses = np.asarray(species_masses, dtype=float).ravel()
+
+    n_gas = _gas_number_density(pressure, temperature)
+    mubar = _mean_molecular_weight(mix, species_masses)
+    rho_gas = _gas_mass_density(n_gas, mubar)
+    particle_mass = _dust_particle_mass(dust_radius, dust_density)
+    rho_dust = n_dust * particle_mass
+
+    gas_column_mass = float(np.sum(rho_gas * dz))
+    dust_column_mass = float(np.sum(rho_dust * dz))
+    epsilon_col = dust_column_mass / gas_column_mass if gas_column_mass > 0.0 else np.nan
+    q_number = np.divide(n_dust, n_gas, out=np.zeros_like(n_dust), where=n_gas > 0.0)
+    q_mass = np.divide(rho_dust, rho_gas, out=np.zeros_like(rho_dust), where=rho_gas > 0.0)
+
+    return {
+        "n_gas": n_gas,
+        "mubar": mubar,
+        "rho_gas": rho_gas,
+        "rho_dust": rho_dust,
+        "q_number": q_number,
+        "q_mass": q_mass,
+        "dust_column_mass": dust_column_mass,
+        "gas_column_mass": gas_column_mass,
+        "epsilon_col": epsilon_col,
+        "tau_9_3": _tau_9p3_from_profile(n_dust, dz, dust_radius),
+    }
+
+
+def solve_lofted_dust_profile(
+    pressure,
+    temperature,
+    dz,
+    mix,
+    species_masses,
+    Kzz,
+    dust_radius,
+    dust_density,
+    epsilon_col,
+    grav,
+):
+    """Solve a simple steady lofted-dust profile on a fixed climate column.
+
+    The profile shape is set by balancing eddy mixing against sedimentation for
+    a fixed particle size. The resulting shape is normalized to the target
+    column dust-to-gas mass ratio `epsilon_col`.
+
+    Parameters
+    ----------
+    pressure : array-like
+        Pressure profile [dynes/cm^2].
+    temperature : array-like
+        Temperature profile [K].
+    dz : array-like
+        Layer thickness profile [cm].
+    mix : array-like
+        Gas mixing-ratio profile with shape `(nlevel, nspecies)` [unitless].
+    species_masses : array-like
+        Molecular masses corresponding to `mix` columns [g/mol].
+    Kzz : array-like
+        Eddy diffusion coefficient profile [cm^2/s].
+    dust_radius : float
+        Dust particle radius [cm].
+    dust_density : float
+        Material density of dust grains [g/cm^3].
+    epsilon_col : float
+        Target column dust-to-gas mass ratio [unitless].
+    grav : float or array-like
+        Gravitational acceleration [cm/s^2]. May be a scalar or a profile with
+        the same length as `pressure`.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray, np.ndarray, dict]
+        `(pressure_out, n_dust, r_dust, diagnostics)` where:
+        `pressure_out` is pressure [dynes/cm^2],
+        `n_dust` is dust particle density [particles/cm^3],
+        `r_dust` is dust radius [cm],
+        and `diagnostics` contains derived profiles and column-integrated
+        quantities such as `tau_9_3`, `epsilon_col`, `q_number`, `q_mass`,
+        and `v_set`.
+    """
+    pressure = np.asarray(pressure, dtype=float).ravel()
+    temperature = np.asarray(temperature, dtype=float).ravel()
+    dz = np.asarray(dz, dtype=float).ravel()
+    mix = np.asarray(mix, dtype=float)
+    species_masses = np.asarray(species_masses, dtype=float).ravel()
+    Kzz = np.asarray(Kzz, dtype=float).ravel()
+
+    nlevel = pressure.size
+    if nlevel == 0:
+        raise ValueError("pressure must be non-empty.")
+    if not (temperature.size == nlevel == dz.size == Kzz.size):
+        raise ValueError("pressure, temperature, dz, and Kzz must have the same length.")
+    if mix.shape != (nlevel, species_masses.size):
+        raise ValueError("mix must have shape (nlevel, nspecies).")
+    if np.any(pressure <= 0.0) or np.any(temperature <= 0.0) or np.any(dz <= 0.0) or np.any(Kzz <= 0.0):
+        raise ValueError("pressure, temperature, dz, and Kzz must be > 0.")
+    if not np.isfinite(dust_radius) or dust_radius <= 0.0:
+        raise ValueError("dust_radius must be finite and > 0.")
+    if not np.isfinite(dust_density) or dust_density <= 0.0:
+        raise ValueError("dust_density must be finite and > 0.")
+    if not np.isfinite(epsilon_col) or epsilon_col < 0.0:
+        raise ValueError("epsilon_col must be finite and >= 0.")
+    grav = np.asarray(grav, dtype=float).ravel()
+    if grav.size == 1:
+        grav = np.full(nlevel, grav[0], dtype=float)
+    if grav.size != nlevel:
+        raise ValueError("grav must be a scalar or have the same length as pressure.")
+    if np.any(~np.isfinite(grav)) or np.any(grav <= 0.0):
+        raise ValueError("grav must be finite and > 0.")
+
+    n_gas = _gas_number_density(pressure, temperature)
+    mubar = _mean_molecular_weight(mix, species_masses)
+    rho_gas = _gas_mass_density(n_gas, mubar)
+    viscosity = _dynamic_viscosity_air(temperature)
+    v_set = _fall_velocity(grav, dust_radius, dust_density, rho_gas, viscosity)
+    v_set *= _slip_correction_factor(dust_radius, n_gas)
+    v_set = np.clip(v_set, 0.0, np.inf)
+
+    # Shape-only solve: fix arbitrary surface mixing ratio and march upward.
+    q_shape = np.zeros(nlevel, dtype=float)
+    q_shape[0] = 1.0
+    for i in range(nlevel - 1):
+        dqdz = -(v_set[i] * q_shape[i]) / Kzz[i]
+        q_next = q_shape[i] + dqdz * dz[i]
+        if q_next <= 0.0 or not np.isfinite(q_next):
+            q_shape[i + 1 :] = 0.0
+            break
+        q_shape[i + 1] = q_next
+
+    n_dust_shape = q_shape * n_gas
+    diagnostics_shape = compute_lofted_dust_diagnostics(
+        pressure=pressure,
+        temperature=temperature,
+        dz=dz,
+        mix=mix,
+        species_masses=species_masses,
+        n_dust=n_dust_shape,
+        dust_radius=dust_radius,
+        dust_density=dust_density,
+    )
+
+    if epsilon_col == 0.0:
+        n_dust = np.zeros_like(n_dust_shape)
+        scale = 0.0
+    else:
+        epsilon_shape = diagnostics_shape["epsilon_col"]
+        if not np.isfinite(epsilon_shape) or epsilon_shape <= 0.0:
+            raise ValueError("Unnormalized dust shape has non-positive epsilon_col; cannot normalize.")
+        scale = epsilon_col / epsilon_shape
+        n_dust = n_dust_shape * scale
+
+    r_dust = np.full(nlevel, dust_radius, dtype=float)
+    diagnostics = compute_lofted_dust_diagnostics(
+        pressure=pressure,
+        temperature=temperature,
+        dz=dz,
+        mix=mix,
+        species_masses=species_masses,
+        n_dust=n_dust,
+        dust_radius=dust_radius,
+        dust_density=dust_density,
+    )
+    diagnostics["v_set"] = v_set
+    diagnostics["Kzz"] = Kzz.copy()
+    diagnostics["shape_scale"] = scale
+    diagnostics["n_dust_shape"] = n_dust_shape
+
+    return pressure.copy(), n_dust, r_dust, diagnostics
+
+
+def solve_lofted_dust_profile_from_climate(
+    c,
+    Kzz,
+    dust_radius,
+    dust_density,
+    epsilon_col,
+    species_masses=None,
+):
+    """Extract a climate column and solve the lofted dust profile.
+
+    Parameters
+    ----------
+    c : object
+        Climate object with `P_surf`, `P`, `dz`, `T_surf`, `T`, `f_i_surf`,
+        `f_i`, `species_names`, and `gravity` attributes.
+    Kzz : array-like
+        Eddy diffusion coefficient profile [cm^2/s]. May have length `nlevel`
+        or `nlevel-1`; if `nlevel-1`, the first value is prepended for the
+        surface level.
+    dust_radius : float
+        Dust particle radius [cm].
+    dust_density : float
+        Material density of dust grains [g/cm^3].
+    epsilon_col : float
+        Target column dust-to-gas mass ratio [unitless].
+    species_masses : array-like, optional
+        Molecular masses for `c.species_names` [g/mol]. If omitted, they are
+        inferred from the species names using a simple chemical-formula parser.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray, np.ndarray, dict]
+        `(pressure_out, n_dust, r_dust, diagnostics)` on the extracted climate
+        level grid, with pressure in [dynes/cm^2], dust number density in
+        [particles/cm^3], and dust radius in [cm].
+    """
+    if not hasattr(c, "P_surf") or not hasattr(c, "P") or not hasattr(c, "dz"):
+        raise ValueError("Climate object must provide `P_surf`, `P`, and `dz`.")
+    if not hasattr(c, "T_surf") or not hasattr(c, "T"):
+        raise ValueError("Climate object must provide `T_surf` and `T`.")
+    if not hasattr(c, "f_i_surf") or not hasattr(c, "f_i"):
+        raise ValueError("Climate object must provide `f_i_surf` and `f_i`.")
+    if not hasattr(c, "species_names"):
+        raise ValueError("Climate object must provide `species_names`.")
+    if not hasattr(c, "gravity"):
+        raise ValueError("Climate object must provide `gravity`.")
+
+    pressure = np.append(float(c.P_surf), np.asarray(c.P, dtype=float).ravel())
+    temperature = np.append(float(c.T_surf), np.asarray(c.T, dtype=float).ravel())
+    dz_internal = np.asarray(c.dz, dtype=float).ravel()
+    dz = np.append(dz_internal[0], dz_internal)
+    mix = np.vstack((np.asarray(c.f_i_surf, dtype=float), np.asarray(c.f_i, dtype=float)))
+
+    Kzz = np.asarray(Kzz, dtype=float).ravel()
+    if Kzz.size == pressure.size - 1:
+        Kzz = np.append(Kzz[0], Kzz)
+    if Kzz.size != pressure.size:
+        raise ValueError("Kzz must have length nlevel or nlevel-1 relative to the extracted climate column.")
+
+    if species_masses is None:
+        species_masses = _species_masses_from_names(list(c.species_names))
+
+    return solve_lofted_dust_profile(
+        pressure=pressure,
+        temperature=temperature,
+        dz=dz,
+        mix=mix,
+        species_masses=species_masses,
+        Kzz=Kzz,
+        dust_radius=dust_radius,
+        dust_density=dust_density,
+        epsilon_col=epsilon_col,
+        grav=np.append(float(c.gravity_surf), np.asarray(c.gravity, dtype=float).ravel()),
+    )
 
 
 def _load_marsdust_optics():
@@ -526,6 +897,7 @@ class DustSolver():
         c.initialize_picaso_from_clima(filename_db, opannection_kwargs={'wave_range': [4.0, 25.0]})
 
         self.c = c
+        self.species_masses = _species_masses_from_names(list(c.species_names))
 
     def compute_P_grid(self, P_surf):
         """Construct the pressure grid used for equilibrium calculations.
@@ -548,35 +920,89 @@ class DustSolver():
         P_grid = np.append(P_grid[0], P_grid[1::2])
         return P_grid
 
-    def g_eval(self, x, P_i, tau_9_3, dust_radius):
+    def _coerce_Kzz_profile(self, Kzz, nlevel):
+        Kzz = np.asarray(Kzz, dtype=float).ravel()
+        if Kzz.size == 1:
+            Kzz = np.full(nlevel, Kzz[0], dtype=float)
+        elif Kzz.size == nlevel - 1:
+            Kzz = np.append(Kzz[0], Kzz)
+        elif Kzz.size != nlevel:
+            raise ValueError("Kzz must be a scalar or have length nlevel or nlevel-1.")
+        if np.any(~np.isfinite(Kzz)) or np.any(Kzz <= 0.0):
+            raise ValueError("Kzz must be finite and > 0.")
+        return Kzz
+
+    def _build_legacy_dust_profile(self, tau_9_3, dust_radius):
+        c = self.c
+        pressure = np.append(c.P_surf, c.P)
+        temperature = np.append(c.T_surf, c.T)
+        dz = np.append(c.dz[0], c.dz)
+        _, n_dust, r_dust = make_dust_profile(
+            pressure=pressure,
+            temperature=temperature,
+            dz=dz,
+            tau_9_3=tau_9_3,
+            dust_radius=dust_radius,
+        )
+        diagnostics = {
+            "tau_9_3": tau_9_3,
+            "epsilon_col": np.nan,
+        }
+        return n_dust, r_dust, diagnostics
+
+    def _build_lofted_dust_profile(self, epsilon_col, Kzz, dust_radius, dust_density):
+        c = self.c
+        nlevel = len(c.P) + 1
+        Kzz_profile = self._coerce_Kzz_profile(Kzz, nlevel)
+        _, n_dust, r_dust, diagnostics = solve_lofted_dust_profile_from_climate(
+            c,
+            Kzz=Kzz_profile,
+            dust_radius=dust_radius,
+            dust_density=dust_density,
+            epsilon_col=epsilon_col,
+            species_masses=self.species_masses,
+        )
+        return n_dust, r_dust, diagnostics
+
+    def g_eval(self, x, P_i, dust_model, **dust_kwargs):
 
         c = self.c
 
-        # Unpack
-        T = x[:]
+        # State vector is the full temperature profile on the pressure grid.
+        T = np.asarray(x, dtype=float).ravel()
 
         # Compute P and dz
         P = self.compute_P_grid(np.sum(P_i))
+        if T.size != len(P):
+            raise ValueError("Temperature state vector is incompatible with the current pressure grid.")
         f_i = np.empty((len(P),len(c.species_names)))
         f_i_ = P_i/np.sum(P_i)
         for i,sp in enumerate(c.species_names):
             f_i[:,i] = f_i_[i]
         c.make_profile_dry(P, T, f_i)
-        dz = np.append(c.dz[0], c.dz)
 
-        # Make dust profile
-        _, n_dust, r_dust = make_dust_profile(
-            pressure=P,
-            temperature=T,
-            dz=dz,
-            tau_9_3=tau_9_3,
-            dust_radius=dust_radius,
-        )
+        # Build dust profile using the selected model.
+        if dust_model == "legacy_tau":
+            n_dust, r_dust, dust_diag = self._build_legacy_dust_profile(
+                tau_9_3=dust_kwargs["tau_9_3"],
+                dust_radius=dust_kwargs["dust_radius"],
+            )
+        elif dust_model == "lofted_epsilon":
+            n_dust, r_dust, dust_diag = self._build_lofted_dust_profile(
+                epsilon_col=dust_kwargs["epsilon_col"],
+                Kzz=dust_kwargs["Kzz"],
+                dust_radius=dust_kwargs["dust_radius"],
+                dust_density=dust_kwargs["dust_density"],
+            )
+        else:
+            raise ValueError(f"Unsupported dust_model `{dust_model}`.")
+        self.last_dust_diagnostics = dust_diag
+
         n_dust = n_dust.reshape(len(n_dust), len(c.particle_names))
         r_dust = r_dust.reshape(len(r_dust), len(c.particle_names))
 
         # set dust profile
-        c.set_particle_density_and_radii(P, n_dust, r_dust)
+        c.set_particle_density_and_radii(np.append(c.P_surf, c.P), n_dust, r_dust)
 
         # Run climate
         converged = c.RCE_robust(P_i)
@@ -586,10 +1012,13 @@ class DustSolver():
         result = np.append(c.T_surf, c.T)
         return result
     
-    def solve(self, P_i, tau_9_3, dust_radius, tol=1, max_tol=1, **kwargs): 
+    def solve(self, P_i, dust_model="legacy_tau", dust_kwargs=None, tol=1, max_tol=1, **solver_kwargs): 
+
+        if dust_kwargs is None:
+            dust_kwargs = {}
 
         def g(x):
-            return self.g_eval(x, P_i, tau_9_3, dust_radius)
+            return self.g_eval(x, P_i, dust_model, **dust_kwargs)
 
         self.c.set_particle_density_and_radii(np.array([1.0]), np.array([[0.0]]), np.array([[1.0e-4]]))
         converged = self.c.RCE_robust(P_i)
@@ -602,7 +1031,7 @@ class DustSolver():
             x0=guess,
             tol=tol,
             max_tol=max_tol,
-            **kwargs
+            **solver_kwargs
         )
         result = solver.solve()
         return result

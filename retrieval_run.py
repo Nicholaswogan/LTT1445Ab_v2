@@ -8,6 +8,7 @@ import LTT1445Ab_grid
 from scipy.stats import truncnorm
 import os 
 import pickle
+import h5py
 from pymultinest.solve import solve
 import gridutils
 from utils import make_lrs_data, make_F1500W_data
@@ -172,6 +173,47 @@ def make_cases():
 
     return cases
 
+def compute_AIC(model_name):
+    # Compute maximum likelihood, k, and AIC for one retrieval, then save the
+    # result as `pymultinest/{model_name}/{model_name}_aic.h5`.
+    if model_name not in RETRIEVAL_CASES:
+        raise ValueError(f"Unknown model_name `{model_name}`.")
+
+    case = RETRIEVAL_CASES[model_name]
+    dirname = os.path.join("pymultinest", model_name)
+    post_file = os.path.join(dirname, f"{model_name}post_equal_weights.dat")
+    if not os.path.exists(post_file):
+        raise FileNotFoundError(f"Could not find posterior sample file: {post_file}")
+
+    samples = np.loadtxt(post_file)
+    if samples.ndim == 1:
+        samples = samples.reshape(1, -1)
+    if samples.shape[1] < 2:
+        raise ValueError(f"Unexpected shape for posterior samples in {post_file}: {samples.shape}")
+
+    max_loglike = float(np.max(samples[:, -1]))
+    k = len(case["param_names"])
+    chi2_min = -2.0 * max_loglike
+    aic = 2.0 * k - 2.0 * max_loglike
+
+    summary = {
+        "max_loglike": max_loglike,
+        "k": k,
+        "chi2_min": chi2_min,
+        "AIC": aic,
+    }
+
+    outfile = os.path.join(dirname, f"{model_name}_aic.h5")
+    with h5py.File(outfile, "w") as f:
+        for key, val in summary.items():
+            if isinstance(val, str):
+                f.create_dataset(key, data=np.array(val, dtype=object), dtype=h5py.string_dtype())
+            else:
+                f.create_dataset(key, data=val)
+
+    return summary
+
+
 WAVL, SPECTRA, PRESS, TEMP = make_interpolators('results/LTT1445Ab.h5')
 SPHINX = hotrocks.sphinx_interpolator('inputs/sphinx.h5')
 RETRIEVAL_CASES = make_cases()
@@ -198,3 +240,6 @@ if __name__ == '__main__':
         )
         # Save pickle
         pickle.dump(results, open(outputfiles_basename+'.pkl','wb'))
+
+        # Compute AIC
+        compute_AIC(model_name)

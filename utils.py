@@ -1,5 +1,7 @@
 import numpy as np
 import re
+from photochem.utils import stars
+import scipy.stats as stats
 
 def make_lrs_data(filename):
     wv1, wv2, wv, fpfs, fpfs_err = np.loadtxt(filename,skiprows=1).T
@@ -54,3 +56,34 @@ def species_to_latex(sp):
     elif sp == 'H2SO4aer':
         sp1 = r'H$_2$SO$_2$ cloud'
     return sp1
+
+def residuals(data_y, err, expected_y):
+    return (data_y - expected_y)/err
+
+def chi_squared(data_y, err, expected_y):
+    R = residuals(data_y, err, expected_y)
+    return np.sum(R**2)
+
+def reduced_chi_squared(data_y, err, expected_y, dof):
+    chi2 = chi_squared(data_y, err, expected_y)
+    return chi2/dof
+
+def compute_sigma(data_y, err, expected_y, dof):
+    chi2_value = chi_squared(data_y, err, expected_y)
+    p_value = stats.chi2.sf(chi2_value, dof)
+    sigma_value = stats.norm.ppf(1 - p_value/2)
+    return sigma_value
+
+def rebin_spectra_to_data(wavl, fpfs1, data_dict):
+    wv_bins = data_dict['bins']
+    fpfs = np.empty(len(wv_bins))
+    for i,b in enumerate(wv_bins):
+        fpfs[i] = stars.rebin(wavl.copy(), fpfs1.copy(), b.copy())
+    return fpfs
+
+def compute_stats(wavl, fpfs, data_dict):
+    fpfs1 = rebin_spectra_to_data(wavl, fpfs, data_dict)
+    args = (data_dict['fpfs'], data_dict['err'], fpfs1, len(fpfs1))
+    rchi2 = reduced_chi_squared(*args)
+    sigma = compute_sigma(*args)
+    return rchi2, sigma
