@@ -44,6 +44,21 @@ def make_F1500W_data(fpfs, ntrans, err_one_transit=None):
 
     return data_dict
 
+def make_lrs_and_F1500W_data(filename, fpfs_15, ntrans, err_one_transit):
+
+    data_dict1 = make_lrs_data(filename)
+    data_dict2 = make_F1500W_data(fpfs_15, ntrans, err_one_transit)
+
+    data_dict = {}
+    for key in ['bins', 'fpfs', 'err', 'wv', 'wv_err']:
+        data_dict[key] = np.concatenate((data_dict1[key], data_dict2[key]))
+
+    order = np.argsort(data_dict['wv'])
+    for key in data_dict:
+        data_dict[key] = data_dict[key][order]
+
+    return data_dict
+
 def species_to_latex(sp):
     sp1 = re.sub(r'([0-9]+)', r"_\1", sp)
     sp1 = r'$\mathrm{'+sp1+'}$'
