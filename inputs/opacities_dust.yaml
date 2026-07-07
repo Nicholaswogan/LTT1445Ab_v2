@@ -1,3 +1,0 @@
-optical-properties:
-  k-method: RandomOverlapResortRebin
-  opacities: {k-distributions: on, CIA: on, rayleigh: on, photolysis-xs: on, particle-xs: [{name: Dust, data: marsdust}]}

@@ -265,13 +265,13 @@ def compute_AIC(model_name):
 
 
 WAVL, SPECTRA, PRESS, TEMP = make_interpolators('results/LTT1445Ab.h5')
-WAVL_HOT, SPECTRA_HOT, PRESS_HOT, TEMP_HOT = make_interpolators('results/LTT1445Ab_hot.h5')
+# WAVL_HOT, SPECTRA_HOT, PRESS_HOT, TEMP_HOT = make_interpolators('results/LTT1445Ab_hot.h5')
 SPHINX = hotrocks.sphinx_interpolator('inputs/sphinx.h5')
 RETRIEVAL_CASES = make_cases()
 
 if __name__ == '__main__':
 
-    models_to_run = ['atm_16']
+    models_to_run = ['rock_16', 'atm_16']
     for model_name in models_to_run:
         # Setup directories
         outputfiles_basename = f'pymultinest/{model_name}/{model_name}'
