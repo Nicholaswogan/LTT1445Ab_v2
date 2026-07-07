@@ -189,5 +189,5 @@ def main_hot():
 
 if __name__ == "__main__":
     # mpiexec -n X python filename.py
-    # main()
-    main_hot()
+    main()
+    # main_hot()
