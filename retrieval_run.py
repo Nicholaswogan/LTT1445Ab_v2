@@ -11,7 +11,7 @@ import pickle
 import h5py
 from pymultinest.solve import solve
 import gridutils
-from utils import make_lrs_data, make_F1500W_data
+from utils import make_lrs_data, make_lrs_and_F1500W_data
 
 def make_interpolators(filename):
     g = gridutils.GridInterpolator(filename)
@@ -209,15 +209,17 @@ def make_cases():
     cases['atm_16'] = make_loglike_prior(data_dict, param_names_atm, model_atm, model_atm_raw, prior_atm)
     cases['atm_hot_16'] = make_loglike_prior(data_dict, param_names_atm_hot, model_atm_hot, model_atm_hot_raw, prior_atm_hot)
 
-    # # F1500W eclipse centered on instant re-radiation
-    # data_dict = make_F1500W_data(184.845e-6, 1)
-    # cases['rock_F1500W_hot'] = make_loglike_prior(data_dict, param_names_rock, model_rock, model_rock_raw, prior_rock)
-    # cases['atm_F1500W_hot'] = make_loglike_prior(data_dict, param_names_atm, model_atm, model_atm_raw, prior_atm)
-
-    # # F1500W eclipse with half instant re-radiation
-    # data_dict = make_F1500W_data(184.845e-6/2, 1)
-    # cases['rock_F1500W_cool'] = make_loglike_prior(data_dict, param_names_rock, model_rock, model_rock_raw, prior_rock)
-    # cases['atm_F1500W_cool'] = make_loglike_prior(data_dict, param_names_atm, model_atm, model_atm_raw, prior_atm)
+    # 1 bar O2, 0.01 bar CO2, and 0.2 albedo.
+    errors = np.arange(5, 41, 5)
+    for err in errors:
+        data_dict = make_lrs_and_F1500W_data(
+            filename='data/LTT1445Ab_Sparta_16.txt',
+            fpfs_15=56.49e-6,
+            ntrans=1,
+            err_one_transit=err*1.0e-6
+        )
+        cases[f'rock_16_F1500W_{err}ppm'] = make_loglike_prior(data_dict, param_names_rock, model_rock, model_rock_raw, prior_rock)
+        cases[f'atm_16_F1500W_{err}ppm'] = make_loglike_prior(data_dict, param_names_atm, model_atm, model_atm_raw, prior_atm)
 
     return cases
 
@@ -269,7 +271,7 @@ RETRIEVAL_CASES = make_cases()
 
 if __name__ == '__main__':
 
-    models_to_run = list(RETRIEVAL_CASES.keys())
+    models_to_run = ['atm_16']
     for model_name in models_to_run:
         # Setup directories
         outputfiles_basename = f'pymultinest/{model_name}/{model_name}'

@@ -26,7 +26,7 @@ def make_lrs_data(filename):
 
 def make_F1500W_data(fpfs, ntrans, err_one_transit=None):
 
-    if err_one_transit == None:
+    if err_one_transit is None:
         err_one_transit = 36e-6 # from proposal
     fpfs_err = err_one_transit/np.sqrt(ntrans)
 
@@ -50,7 +50,8 @@ def make_lrs_and_F1500W_data(filename, fpfs_15, ntrans, err_one_transit):
     data_dict2 = make_F1500W_data(fpfs_15, ntrans, err_one_transit)
 
     data_dict = {}
-    for key in ['bins', 'fpfs', 'err', 'wv', 'wv_err']:
+    data_dict['bins'] = np.vstack((data_dict1['bins'], data_dict2['bins']))
+    for key in ['fpfs', 'err', 'wv', 'wv_err']:
         data_dict[key] = np.concatenate((data_dict1[key], data_dict2[key]))
 
     order = np.argsort(data_dict['wv'])
