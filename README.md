@@ -50,7 +50,7 @@ python retrieval_run.py
 
 ## Step 5: Figures
 
-Finally, make some of the key figures in the paper with.
+Finally, you can reproduce Figure 2 and 3 in the manuscript with the following:
 
 ```sh
 python figures.py
