@@ -1,0 +1,23 @@
+{
+  "components": [
+    {
+      "path": "/Users/nicholas/Applications/PandExo_data/pandeia_data/jwst/miri/filters/jwst_miri_f1500w_trans_20221013160429.fits",
+      "sha256": "4b3128b0a9f53f52e8d75667d23ac59b0f38d71cbc2f6c582621ba105798c4f5"
+    },
+    {
+      "path": "/Users/nicholas/Applications/PandExo_data/pandeia_data/jwst/miri/qe/jwst_miri_imager_qe_20170404135013.fits",
+      "sha256": "b569e0e5b1431e6f7c954f0f312e10782843d80c376877833ba003a2630ae157"
+    },
+    {
+      "path": "/Users/nicholas/Applications/PandExo_data/pandeia_data/jwst/telescope/jwst_telescope_ote_thruput_20221006094019.fits",
+      "sha256": "0728edfeddb1a8f54fbd2b1999677d99b0aa05c2b3bb5324a629b85003a15c9c"
+    }
+  ],
+  "method": "product of filter/instrument transmission, imager QE and OTE throughput; linear interpolation to filter grid",
+  "support_um": [
+    12.94219970703125,
+    17.332799911499023
+  ],
+  "reference_data_version": "2.0",
+  "note": "Local reference data; verify calibration choice with the observer. No aperture or time-dependent correction."
+}

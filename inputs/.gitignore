@@ -1,3 +1,5 @@
 *
 !.gitignore
 !opacities_dust.yaml
+!F1500W_response.txt
+!F1500W_response.json
