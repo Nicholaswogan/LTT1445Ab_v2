@@ -1,178 +1,131 @@
-# First-pass retrieval with the non-RV-GP global fit
+# Retrievals with the final GP system fit
 
-Use `retrieval_run_joint.py` for the new analysis. `retrieval_run.py`, its
-148 +/- 11 ppm helper, its independent legacy system priors, and all existing
-files under `pymultinest/` are preserved.
+The supported system fit is
+`data/LTT1445_Joint__Alltransiteclipse_binDDT60s_v2_12758GP_RVGP_e_w/`.
+Only its unrounded `MCMCResults*.csv` is required for inference. This fit
+includes an RV GP and a photometric SHO GP plus exponential baseline for the
+DD12758 F1500W visit. Planet b is column index `__0`.
 
-## Adopted observations and system constraints
+## Observations and likelihood
 
-The selected source is
-`data/LTT1445_Joint__Alltransiteclipse_binDDT60s_v2_e_w/MCMCResults_LTT1445_Joint__Alltransiteclipse_binDDT60s_v2_e_w.csv`.
-The runner reads this file directly, using planet b (`__0`). It has 10,000
-post-warmup draws and agrees with the four saved traces. It is the non-RV-GP
-fit, not the similarly named RVGP folder or the older standalone rounded CSV.
+The F1500W chain median is **157.472924 ppm**, with lower/upper uncertainties
+**17.313102/17.816034 ppm**, from the central 68.268949% interval. Report this
+as **157 +18/-17 ppm**. These statistics use all source draws, before Teq
+conditioning. The two-piece Gaussian likelihood uses the lower uncertainty
+for predictions below the median and the upper uncertainty above it. This
+is a small-asymmetry approximation to the depth marginal, not its exact PDF.
 
-F1500W uses the full chain's eclipse-depth mean and sample standard deviation:
-**153.1200228 +/- 12.0113084 ppm**, approximated by a Gaussian likelihood.
-The published SPARTA 16-bin LRS spectrum is retained unchanged. The combined
-likelihood assumes independent spectral bins and independent instruments.
-The LRS broadband eclipse depth in the global chain is not added as another
-datum, since it would reuse the spectral information.
+The SPARTA LRS spectra are retained unchanged, with independent symmetric
+Gaussian bin errors. The combined likelihood adds LRS and F1500W terms,
+assuming independent instruments. The broadband LRS depth in the system
+chain is not added as another observation. `utils.observation_loglike` is
+shared by the climate-constrained and free-temperature retrievals.
+Constant likelihood normalization terms are omitted; they cancel between
+rock/atmosphere fits to the same observations. Do not compare absolute
+log-evidences across different datasets.
 
-The system distribution preserves joint constraints rather than treating Teq
-and Teff as independent:
+`err_lower` and `err_upper` contain the measurement errors used for inference.
+`err` is their average for compatibility only. New plots use
+`utils.observation_yerr` to retain asymmetric error bars. The legacy
+148 +/- 11 ppm helper remains confined to `retrieval_run.py`'s older cases.
 
-1. Compute `Teq = Teff / sqrt(2*aor__0)` for every chain draw.
-2. Retain the complete joint rows satisfying the saved climate grid support,
-   **385 <= Teq <= 477 K**. This keeps **9,768/10,000 draws**; 1.92% are below
-   and 0.40% above the grid. Temperatures are never clipped to grid boundaries.
-3. Fit empirical marginal quantile functions and a Gaussian copula to the
-   retained `(Teq, a/Rstar, Rp/Rstar)` samples. Ordered samples define continuous,
-   piecewise-linear marginal quantile functions; ranked normal scores define
-   the copula correlation matrix. This preserves marginal asymmetry while
-   approximating the dependence between parameters.
-4. Transform three unit-cube coordinates jointly, then derive
-   `Teff = Teq * sqrt(2*a/Rstar)`. The parameters passed to the spectral model
-   and saved by MultiNest remain `(Teq, Teff, R_planet_star)`.
+## Correlated system prior and grid
 
-This is a normalized continuous approximation to the retained empirical
-posterior, not an exact representation of its full joint density. Each marginal
-has the finite support of the retained samples. A plain multivariate Gaussian
-was insufficient to meet the validation threshold in the a/Rstar tail; the
-copula construction passes the checks on marginals and correlations.
+1. Compute Teq = Teff / sqrt(2 a/Rstar) for every source draw.
+2. Retain complete rows with **385 <= Teq <= 477 K**: **9,791/10,000** draws.
+   The excluded fractions are 1.75% below and 0.34% above the grid. Values
+   are never clipped to its boundaries.
+3. Fit empirical marginal quantile functions and a Gaussian copula in
+   (Teq, a/Rstar, Rp/Rstar), then derive Teff in the prior transform.
+4. Validate generated marginals and correlations and check stellar-grid support.
 
-The code checks that the entire constructed support remains inside the SPHINX
-Teff grid. Unit-cube endpoints are moved inward by machine epsilon to avoid
-infinite normal scores; this does not clip physical Teq values. Validation
-compares 100,000 generated draws with the retained chain using marginal
-quantiles, KS distances and correlations. The forward models are checked at
-unit-cube endpoints and at the center.
+The source includes the eclipse observations. Reusing its system marginal
+with a separate eclipse likelihood neglects weak parameter/depth correlations;
+this remains a modular approximation, not an independent-data prior or a new
+light-curve fit. "F1500W only" describes the emission likelihood, not the
+provenance of the system constraints.
 
-**Scientific approximation:** the source fit already used LRS and F1500W eclipse
-observations. Its system marginal is reused with a separate eclipse-depth
-likelihood, neglecting the measured weak dependence between system parameters
-and depth. This is the agreed first-pass modular treatment, not an
-independent-data prior or a full reanalysis of the light curves. The same
-system distribution is used for the LRS-only, F1500W-only, and combined cases;
-"F1500W-only" describes the emission likelihood, not the provenance of all
-system constraints. No RV or transit likelihood is evaluated again.
+The provided traces contain 71 post-warmup divergence flags across 10,000
+samples (11, 58, 2, 0 by chain). They are retained; assess these diagnostics
+with the fit author before publication. Small shifts after diagnostic removal
+do not establish unbiased posterior tails.
 
-## Spectral models and throughput
+The climate grid keeps its fixed 2.73 Earth masses and 1.34 Earth radii.
+The final system fit gives approximately 2.38 Earth masses and 1.30 Earth
+radii. Seven paired climate calculations found maximum mass/radius-induced
+changes of **0.71 ppm in F1500W** and **1.26 ppm in an LRS bin**. All converged.
+The existing grid is retained given these small changes relative to the errors;
+this is a representative sensitivity check, not an exhaustive guarantee.
+See `results/final_gp_v1/new_data_assessment.json` after running the assessment.
 
-The physical spectral functions are reused from `retrieval_run.py`. No global
-legacy prior or response settings are changed. The existing climate grid keeps
-its original fixed mass (2.73 Mearth), radius (1.34 Rearth), stellar irradiation
-shape and other assumptions. No new climate calculations or grid extension
-are needed for this first pass.
+Atmospheric priors are unchanged: independent uniform log10 partial pressures
+in bar, H2O/CO2/SO2 [-7,2], O2 [-5,2]; uniform log10 chi over [log10(0.05),
+log10(0.8)]; and surface albedo uniform [0,0.4].
 
-F1500W uses `inputs/F1500W_response.txt` by default: the local Pandeia
-filter/instrument transmission times imager QE times OTE throughput. A custom
-file can be supplied with `--response`. The photon-count prediction is
+F1500W always uses `inputs/F1500W_response.txt`, a product of filter/instrument,
+QE, and telescope throughputs. The prediction is
+`(Rp/Rstar)^2 integral(lambda R Fplanet) / integral(lambda R Fstar)`.
+LRS bins retain rectangular averages. Display bounds do not truncate the
+photometric response wings.
 
-`(Rp/Rstar)^2 * integral(lambda R Fplanet) / integral(lambda R Fstar)`.
+## Validate and run
 
-The display bounds in the data dictionary are not used to truncate the filter
-wings. The continuous spectrum, stellar flux, and full response enter the
-photometric integral. There is no rectangular-bin override in the new runner.
-Synthetic proposal cases in the legacy runner retain their historical treatment.
-
-## Running and outputs
-
-Run from the repository root in the existing environment:
+Use conda environment `ltt` from the repository root:
 
 ```sh
-conda activate ltt
-# Optional writable caches for restricted environments:
-export NUMBA_CACHE_DIR=/private/tmp/ltt_numba
-export MPLCONFIGDIR=/private/tmp/ltt_mpl
-
-# Check distribution and physical predictions without sampling:
-python retrieval_run_joint.py --check-only
-
-# Run the six new retrievals:
+python assess_new_data.py --sensitivity
+python retrieval_run_joint.py --check-only --report validation/final_joint_setup.json
+python -m unittest discover -s tests -v
 python retrieval_run_joint.py
 ```
 
-The six default cases are `rock_16`, `atm_16`, `rock_F1500W_obs`,
-`atm_F1500W_obs`, `rock_16_F1500W_obs`, and `atm_16_F1500W_obs`. Select a subset
-with `--cases`, e.g. `--cases rock_F1500W_obs atm_F1500W_obs`.
-
-Use `--lrs-bins 8` for the corresponding SPARTA 8-bin sensitivity test. To add
-only the four LRS-dependent runs to an existing tag, reusing its completed
-F1500W-only results:
+The default six cases are `rock_16`, `atm_16`, `rock_F1500W_obs`,
+`atm_F1500W_obs`, `rock_16_F1500W_obs`, and `atm_16_F1500W_obs`.
+To add the four 8-bin LRS-dependent cases while sharing F1500W-only results:
 
 ```sh
-python retrieval_run_joint.py --lrs-bins 8 --tag nonrv_gp_v1 \
+python retrieval_run_joint.py --lrs-bins 8 \
   --cases rock_8 atm_8 rock_8_F1500W_obs atm_8_F1500W_obs
 ```
 
-The default remains 16 bins. With a fresh tag and no `--cases` option, either
-bin selection runs all six cases, including the same F1500W-only comparison.
-Old case directories are never overwritten or implicitly resumed.
+Results go to **`pymultinest_joint/final_gp_v1/<case>/`**. The default is
+1,000 live points. Existing case directories are refused and runs are not
+implicitly resumed. `--tag` selects a fresh output namespace. The joint
+runner's commands above are serial; use the MPI-aware free runner documented
+in `FREE_RETRIEVAL.md` for free-temperature inference on the HPC.
 
-Outputs go to **`pymultinest_joint/nonrv_gp_v1/<case>/`**, separate from the
-historical tree. `--tag another_name` creates another run namespace. The runner
-uses 1,000 live points by default, refuses existing case directories, and starts
-without resuming an earlier chain. Relative filename prefixes are passed to
-native MultiNest to avoid filename-buffer limits in long checkout paths.
-The 8-bin LRS-only and combined cases were subsequently run at 1,000 live
-points under `nonrv_gp_v1`, reusing the original F1500W-only results.
+Each case writes native MultiNest outputs, a result pickle, AIC diagnostics,
+and `inputs.json` containing source hashes, fit identity, observations,
+asymmetric errors, priors, response and grid provenance. Sampling summaries
+and plots must be regenerated from these new results; old figures are not
+updated simply by changing their labels.
 
-Each case saves normal MultiNest files, a result pickle, an AIC diagnostic,
-and `inputs.json`. The latter records the chain hash, truncation and copula
-settings, validation results, response values/hash, data, model source hashes,
-fixed grid inputs and sampler settings. The grid itself is identified by path,
-size and modification time. Old and new analyses can be imported together.
-
-To save an additional setup report, choose a new JSON path:
+## Figures and derived climates
 
 ```sh
-python retrieval_run_joint.py --check-only --report validation/joint_setup.json
-python -m unittest discover -s tests -v
+python figure_joint.py
+python figure_joint.py --lrs-bins 8
+python figures_presentation.py --figure retrieval
+python figures_presentation.py --figure joint-posteriors
+python figures_presentation.py --figure joint-spectra
+python figures_presentation.py --figure f1500w-posteriors
+python figures_presentation.py --figure f1500w-spectra
+python posterior_climate.py
+python posterior_climate.py --case f1500w
 ```
 
-Compare rock and atmosphere evidences only for the same dataset and system
-prior. As in the historical runner, Gaussian normalization constants are omitted
-from the log likelihood; they cancel in those matched model comparisons.
-Do not compare absolute evidence values across different datasets. AIC for a
-single photometric datum is retained only as a file-format convenience, not as
-the atmospheric-retention decision statistic.
+Comparison figures and spectral caches are under `figures/joint/`;
+presentation outputs and caches are under `figures/present/`. New plots overwrite
+the previous figures at these paths.
+Derived climate HDF5/JSON files are under `results/final_gp_v1/`.
+Pressure upper limits are consistently the **97.5th posterior percentiles**,
+with matching annotations and metadata. Spectral shading remains the pointwise
+central one-sigma interval. Joint-density contour probabilities (68%, 95%)
+are separate from the upper-limit convention.
 
-Check posterior proximity to the Teq limits after sampling. A final analysis
-may need a grid extension and a more complete treatment of the system/eclipse
-joint inference.
-
-## Comparison figure
-
-Run `python figure_joint.py` in `ltt` to produce
-`figures/joint/figure_joint.pdf` and `.png`. The top row compares the three
-atmospheric posterior spectra (median and pointwise 1-sigma bands), a fixed
-zero-albedo blackbody reference, both datasets and the response weighted by
-stellar photon flux (`lambda * R * Fstar_lambda`), alongside
-the total surface-pressure posteriors. Four bottom panels show the H2O, CO2,
-O2 and SO2 partial-pressure posteriors. Colors identify the dataset throughout;
-matching-color dotted lines mark the 97.5th-percentile total and partial
-pressure upper limits. Partial-pressure markers use lighter opacity, and a
-single explanatory legend appears in the total-pressure panel. There are no
-prior curves or numerical upper-limit labels.
-
-For the complementary 8-bin figure, run `python figure_joint.py --lrs-bins 8`.
-This reads the 8-bin LRS-only/combined cases and the shared F1500W-only result
-from the selected `--results` directory. Its default output prefix is
-`figures/joint/figure_joint_8`, so the 16-bin PDF, PNG and cache are preserved.
-The default `--lrs-bins 16` retains the original filenames.
-
-Adding bin selection changed the joint runner's source hash. When an otherwise
-unchanged older result records that runner hash, the plotter verifies the
-saved observations and recomputes five posterior likelihoods before accepting
-it. Changes to physical-model sources or the chain/stellar/response data still
-cause an error. This keeps the original 16-bin and F1500W results usable without
-editing their metadata.
-
-All posterior draws are used by default. Spectral bands are cached in
-`figure_joint_spectra.npz`, with input/model fingerprints checked before reuse.
-Use `--refresh-cache` to recompute them, `--results` to select another result
-directory, or `--output-prefix` to choose the output filenames. An optional
-`--max-spectra N` limits only spectral draws for a quick preview; pressure
-histograms always use every posterior draw. The `.json` sidecar records the
-plotted cases, fingerprints, interval convention and bare-rock reference.
+Plotting validates that posterior metadata identify the supported source fit.
+It does not fall back to archived results. `figure_joint.py --results` can
+select another output tag from the same final fit. `--output-prefix` selects
+an alternate figure location. Fingerprints invalidate caches when inputs
+change. `--refresh-cache`/`--refresh-spectra`/`--refresh-models` force their
+respective recalculations.

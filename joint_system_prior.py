@@ -1,4 +1,4 @@
-"""Continuous, correlated system constraints for the preliminary joint retrieval.
+"""Continuous, correlated system constraints from the final GP system fit.
 
 The chain is conditioned on grid support before constructing empirical marginal
 quantile functions and a Gaussian copula. This retains asymmetric marginals
@@ -12,12 +12,24 @@ import pandas as pd
 from scipy.stats import norm, rankdata, ks_2samp
 
 ROOT = Path(__file__).resolve().parent
-DEFAULT_CHAIN = ROOT / 'data/LTT1445_Joint__Alltransiteclipse_binDDT60s_v2_e_w'
+DEFAULT_CHAIN = ROOT / 'data/LTT1445_Joint__Alltransiteclipse_binDDT60s_v2_12758GP_RVGP_e_w'
+FIT_TAG = 'final_gp_v1'
+RESULTS_DIR = ROOT / 'pymultinest_joint' / FIT_TAG
+JOINT_FIGURE_DIR = ROOT / 'figures/joint' / FIT_TAG
+PRESENT_FIGURE_DIR = ROOT / 'figures/present' / FIT_TAG
+DERIVED_DIR = ROOT / 'results' / FIT_TAG
 COLUMNS = ['teff', 'aor__0', 'ror__0', 'EclipseDepth_F1500W__0']
 
 
 def sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def require_current_fit(metadata):
+    """Refuse stale posterior inputs rather than silently plotting another fit."""
+    source, = DEFAULT_CHAIN.glob('MCMCResults*.csv')
+    if metadata.get('fit_tag') != FIT_TAG or metadata['system_prior']['source_sha256'] != sha256(source):
+        raise ValueError(f'Results must be generated from the supported {FIT_TAG} system fit')
 
 
 class JointSystemPrior:
@@ -63,6 +75,9 @@ class JointSystemPrior:
         self.source = None
         self.eclipse_mean = None
         self.eclipse_sd = None
+        self.eclipse_median = None
+        self.eclipse_err_lower = None
+        self.eclipse_err_upper = None
 
     @classmethod
     def from_chain(cls, directory=DEFAULT_CHAIN, **kwargs):
@@ -78,6 +93,10 @@ class JointSystemPrior:
         depth = data.EclipseDepth_F1500W__0.to_numpy()
         result.eclipse_mean = float(depth.mean())
         result.eclipse_sd = float(depth.std(ddof=1))
+        lo, median, hi = np.quantile(depth, [.15865525393145707, .5, .8413447460685429])
+        result.eclipse_median = float(median)
+        result.eclipse_err_lower = float(median-lo)
+        result.eclipse_err_upper = float(hi-median)
         return result
 
     def transform(self, unit):
@@ -139,6 +158,9 @@ class JointSystemPrior:
             'copula_correlation': self.copula_correlation.tolist(),
             'marginal_interpolation': 'linear quantiles, equally spaced probabilities from zero to one',
             'derivation': 'Teq=Teff/sqrt(2*aor); transformed samples return (Teq,Teff,ror)',
-            'F1500W_depth': self.eclipse_mean, 'F1500W_sd': self.eclipse_sd,
+            'F1500W_depth': self.eclipse_median,
+            'F1500W_error_lower': self.eclipse_err_lower, 'F1500W_error_upper': self.eclipse_err_upper,
+            'F1500W_mean': self.eclipse_mean, 'F1500W_sd': self.eclipse_sd,
+            'F1500W_summary': 'Median with central 68.268949% interval from the unconditioned chain',
             'approximation': 'All-data system marginal reused with a separate Gaussian eclipse likelihood; correlations with eclipse depth are neglected. This is not an eclipse-independent prior.',
         }

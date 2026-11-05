@@ -1,11 +1,12 @@
-"""Numerical validation of the joint prior and historical retrieval regressions."""
+"""Validate the final-fit prior, asymmetric photometry, and retrieval predictions."""
 from pathlib import Path
 import unittest
 
 import numpy as np
 
 import retrieval_run as legacy
-from joint_system_prior import JointSystemPrior
+from joint_system_prior import JointSystemPrior, RESULTS_DIR, FIT_TAG, require_current_fit
+from utils import observation_loglike, observation_yerr, make_joint_photometry
 from retrieval_run_joint import JointRetrieval, CASE_NAMES, case_names
 
 
@@ -17,11 +18,32 @@ class JointPriorTests(unittest.TestCase):
     def test_chain_selection_and_measurement(self):
         meta = self.prior.metadata()
         self.assertEqual(meta['chain_draws'], 10000)
-        self.assertEqual(meta['retained_draws'], 9768)
-        self.assertAlmostEqual(meta['below_grid_fraction'], .0192)
-        self.assertAlmostEqual(meta['above_grid_fraction'], .004)
-        self.assertAlmostEqual(self.prior.eclipse_mean*1.e6, 153.12002277814954)
-        self.assertAlmostEqual(self.prior.eclipse_sd*1.e6, 12.011308357456112)
+        self.assertEqual(meta['retained_draws'], 9791)
+        self.assertAlmostEqual(meta['below_grid_fraction'], .0175)
+        self.assertAlmostEqual(meta['above_grid_fraction'], .0034)
+        self.assertIn('12758GP_RVGP', str(self.prior.source))
+        self.assertAlmostEqual(self.prior.eclipse_median*1.e6, 157.4729237374)
+        self.assertAlmostEqual(self.prior.eclipse_err_lower*1.e6, 17.313102253804)
+        self.assertAlmostEqual(self.prior.eclipse_err_upper*1.e6, 17.816033503901)
+
+    def test_asymmetric_measurement_likelihood(self):
+        data = make_joint_photometry(self.prior)
+        center = data['fpfs']
+        self.assertEqual(observation_loglike(data, center), 0.)
+        for side, error in [(-1, data['err_lower']), (1, data['err_upper'])]:
+            self.assertAlmostEqual(observation_loglike(data, center+side*error), -.5)
+            self.assertAlmostEqual(observation_loglike(data, center+side*2*error), -2.)
+        self.assertNotAlmostEqual(observation_loglike(data, center+data['err_lower']), -.5)
+        np.testing.assert_array_equal(observation_yerr(data), [data['err_lower'], data['err_upper']])
+        symmetric = dict(fpfs=np.array([.1, .2]), err=np.array([.01, .03]))
+        prediction = np.array([.12, .17])
+        self.assertAlmostEqual(observation_loglike(symmetric, prediction), -2.5)
+
+    def test_current_source_guard(self):
+        metadata = dict(fit_tag=FIT_TAG, system_prior=self.prior.metadata())
+        require_current_fit(metadata)
+        with self.assertRaises(ValueError):
+            require_current_fit(dict(metadata, fit_tag='different_fit'))
 
     def test_prior_reproduces_retained_distribution(self):
         report = self.prior.validate()
@@ -71,8 +93,12 @@ class JointForwardTests(unittest.TestCase):
             parameters = single['prior'](np.full(len(single['param_names']), .5))
             mask = combined['data_dict']['photometric']
             np.testing.assert_allclose(combined['predict'](parameters)[mask], single['predict'](parameters))
-            np.testing.assert_allclose(single['data_dict']['fpfs'], [self.retrieval.system.eclipse_mean])
-            np.testing.assert_allclose(single['data_dict']['err'], [self.retrieval.system.eclipse_sd])
+            np.testing.assert_allclose(single['data_dict']['fpfs'], [self.retrieval.system.eclipse_median])
+            np.testing.assert_allclose(single['data_dict']['err_lower'], [self.retrieval.system.eclipse_err_lower])
+            np.testing.assert_allclose(single['data_dict']['err_upper'], [self.retrieval.system.eclipse_err_upper])
+            mask = ~combined['data_dict']['photometric']
+            np.testing.assert_array_equal(combined['data_dict']['err_lower'][mask],
+                                          combined['data_dict']['err_upper'][mask])
 
 
 class LegacyRegressionTests(unittest.TestCase):
@@ -120,11 +146,13 @@ class EightBinTests(unittest.TestCase):
         checks = self.eight.check_forward_models()
         self.assertTrue(all(c['finite_at_unit_endpoints_and_center'] for c in checks.values()))
 
-    def test_saved_sixteen_bin_likelihoods_unchanged(self):
-        root = Path('pymultinest_joint/nonrv_gp_v1')
+    def test_saved_final_likelihoods(self):
+        root = RESULTS_DIR
         if not root.exists():
             self.skipTest('Joint retrieval outputs are not installed')
         for name, case in self.sixteen.cases.items():
+            if not (root/name/(name+'post_equal_weights.dat')).exists():
+                continue
             data = np.atleast_2d(np.loadtxt(root/name/(name+'post_equal_weights.dat')))
             for i in np.linspace(0, len(data)-1, 5, dtype=int):
                 with self.subTest(case=name, row=int(i)):

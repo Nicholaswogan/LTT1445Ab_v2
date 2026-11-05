@@ -6,9 +6,19 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 
-ROOT = Path(__file__).resolve().parent
+from joint_system_prior import (ROOT, FIT_TAG, RESULTS_DIR,
+                                JointSystemPrior, require_current_fit)
+from utils import make_joint_photometry, observation_yerr, observation_loglike
+
+JOINT_FIGURE_DIR = ROOT / 'figures/joint'
+PRESENT_FIGURE_DIR = ROOT / 'figures/present'
+
+
+def _final_photometry():
+    return make_joint_photometry(JointSystemPrior.from_chain())
+
+
 F1500W_COLOR = 'red'
 
 def figure_data():
@@ -22,13 +32,9 @@ def figure_data():
                 label='MIRI LRS (Wachiraphan+25)')
 
     # Use the same updated F1500W measurement as the joint retrieval.
-    chain = ROOT/'data/LTT1445_Joint__Alltransiteclipse_binDDT60s_v2_e_w'
-    paths = list(chain.glob('MCMCResults*.csv'))
-    if len(paths) != 1:
-        raise ValueError('Expected one MCMCResults CSV in the non-RV-GP chain folder')
-    depths = pd.read_csv(paths[0], usecols=['EclipseDepth_F1500W__0'])['EclipseDepth_F1500W__0']
-    ax.errorbar((13.6+16.5)/2, depths.mean()*1.e6,
-                xerr=(16.5-13.6)/2, yerr=depths.std(ddof=1)*1.e6,
+    photometry = _final_photometry()
+    ax.errorbar(photometry['wv'], photometry['fpfs']*1.e6,
+                xerr=photometry['wv_err'], yerr=observation_yerr(photometry)*1.e6,
                 fmt='s', color=F1500W_COLOR, markersize=6, elinewidth=1, capsize=2,
                 label='MIRI F1500W (Ih+2026; DDT)')
 
@@ -38,7 +44,7 @@ def figure_data():
     ax.legend(loc='upper left', bbox_to_anchor=(0.0, 1), frameon=False, fontsize=13)
 
     fig.tight_layout()
-    output = ROOT/'figures/present/figure_data.png'
+    output = PRESENT_FIGURE_DIR/'figure_data.png'
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=300)
     print(f'Saved {output}')
@@ -48,20 +54,24 @@ def figure_data():
 def _nominal_models(refresh=False):
     """Cache RCE profiles and PICASO spectra; plotting edits reuse the cache."""
     import planets
-    from astropy import constants
     from photochem.utils import stars
 
     pl, st = planets.LTT1445Ab, planets.LTT1445A
+    system = JointSystemPrior.from_chain()
+    nominal_teq, nominal_teff, radius_ratio = system.transform(np.full(3, .5))
     database = ROOT/'picasofiles/opacities_photochem_0.1_250.0_R15000.db'
     stellar_file = ROOT/'inputs/sphinx.h5'
-    config = dict(version=1, Teq=pl.Teq, Teff=st.Teff, mass=pl.mass, radius=pl.radius,
+    config = dict(version=2, Teq=float(nominal_teq), Teff=float(nominal_teff),
+                  radius_ratio=float(radius_ratio), mass=pl.mass, radius=pl.radius,
+                  system_source=str(system.source), system_source_sha256=system.metadata()['source_sha256'],
+                  stellar_irradiation_Teff=st.Teff,
                   star_radius=st.radius, metallicity=st.metal, logg=st.logg, chi=.2,
                   albedo=0., pressure_top_dyn_cm2=1., resolution=100,
                   atmospheres=[['H2O', .1], ['CO2', 0.001], ['SO2', 0.01]],
                   database_stat=[database.stat().st_size, database.stat().st_mtime_ns],
                   stellar_stat=[stellar_file.stat().st_size, stellar_file.stat().st_mtime_ns])
     fingerprint = json.dumps(config, sort_keys=True)
-    cache = ROOT/'figures/present/nominal_models.npz'
+    cache = PRESENT_FIGURE_DIR/'nominal_models.npz'
     if cache.exists() and not refresh:
         with np.load(cache, allow_pickle=False) as saved:
             if saved['fingerprint'].item() == fingerprint:
@@ -72,22 +82,21 @@ def _nominal_models(refresh=False):
     from photochem.extensions import hotrocks
     # Initialize only one climate/PICASO object, without loading emission grids.
     c = hotrocks.AdiabatClimateThermalEmission(
-        Teq=pl.Teq, M_planet=pl.mass, R_planet=pl.radius, R_star=st.radius,
+        Teq=nominal_teq, M_planet=pl.mass, R_planet=pl.radius, R_star=st.radius,
         Teff=st.Teff, metal=st.metal, logg=st.logg, catdir='sphinx',
         sphinx_filename=str(stellar_file))
     c.verbose = False
     c.P_top = 1.
     c.tidally_locked_dayside = True
     c.chi = .2
-    c.rad.set_bolometric_flux(stars.equilibrium_temperature_inverse(pl.Teq, 0.))
+    c.rad.set_bolometric_flux(stars.equilibrium_temperature_inverse(nominal_teq, 0.))
     c.set_custom_albedo(np.array([1.]), np.array([0.]))
     c.initialize_picaso_from_clima(str(database), opannection_kwargs={'wave_range': [4., 25.]})
     wavelength = stars.grid_at_resolution(float(c.ptherm.opa.wave.min()),
                                           float(c.ptherm.opa.wave.max()), R=100)
     sphinx = hotrocks.sphinx_interpolator(str(stellar_file))
-    wave, stellar_flux = sphinx(st.Teff, st.metal, st.logg, rescale_to_Teff=False)
+    wave, stellar_flux = sphinx(nominal_teff, st.metal, st.logg, rescale_to_Teff=False)
     stellar_flux = stars.rebin(stars.make_bins(wave), stellar_flux, wavelength)
-    radius_ratio = (pl.radius*constants.R_earth/(st.radius*constants.R_sun)).decompose().value
     result = dict(wavelength=wavelength, stellar_flux=stellar_flux,
                   nominal_parameters=np.array(fingerprint))
     for species, pressure in config['atmospheres']:
@@ -102,7 +111,7 @@ def _nominal_models(refresh=False):
         _, flux, _ = c.fpfs_picaso(wavl=wavelength)
         result[f'{species}_ratio'] = flux/stellar_flux*radius_ratio**2
     rock_temperature = hotrocks.bare_rock_dayside_temperature(
-        stars.equilibrium_temperature_inverse(pl.Teq, 0.), 0., 2/3)
+        stars.equilibrium_temperature_inverse(nominal_teq, 0.), 0., 2/3)
     centers = (wavelength[1:]+wavelength[:-1])/2
     result['rock_temperature'] = np.array(rock_temperature)
     result['rock_ratio'] = np.pi*stars.blackbody_cgs(rock_temperature, centers/1.e4)/stellar_flux*radius_ratio**2
@@ -121,12 +130,8 @@ def figure_models(refresh=False):
 
     models = _nominal_models(refresh=refresh)
     data = make_lrs_data(ROOT/'data/LTT1445Ab_Sparta_16.txt')
-    chain = ROOT/'data/LTT1445_Joint__Alltransiteclipse_binDDT60s_v2_e_w'
-    paths = list(chain.glob('MCMCResults*.csv'))
-    if len(paths) != 1:
-        raise ValueError('Expected one MCMCResults CSV in the non-RV-GP chain folder')
-    depths = pd.read_csv(paths[0], usecols=['EclipseDepth_F1500W__0'])['EclipseDepth_F1500W__0']
-    observed_f15, error_f15 = depths.mean(), depths.std(ddof=1)
+    photometry = _final_photometry()
+    observed_f15 = float(photometry['fpfs'][0])
     response = np.loadtxt(ROOT/'inputs/F1500W_response.txt').T
     wavelength = models['wavelength']
     centers = (wavelength[1:]+wavelength[:-1])/2
@@ -138,10 +143,12 @@ def figure_models(refresh=False):
     legend_handles = []
     model_artists = []
     degrees_of_freedom = len(data['fpfs']) + 1  # Fixed models: no fitted parameters.
-    summary = dict(nominal_parameters=json.loads(models['nominal_parameters'].item()),
+    summary = dict(fit_tag=FIT_TAG, nominal_parameters=json.loads(models['nominal_parameters'].item()),
                    chi2_definition='Sum over 16 LRS bins and one F1500W point; parameters fixed, not fitted',
                    degrees_of_freedom=degrees_of_freedom,
-                   F1500W_depth_ppm=float(observed_f15*1.e6), F1500W_error_ppm=float(error_f15*1.e6),
+                   F1500W_depth_ppm=float(observed_f15*1.e6),
+                   F1500W_error_lower_ppm=float(photometry['err_lower'][0]*1.e6),
+                   F1500W_error_upper_ppm=float(photometry['err_upper'][0]*1.e6),
                    models={})
     for name, label, color in [('CO2', r'0.001 bar CO$_2$', 'C2'),
                                 ('H2O', r'0.1 bar H$_2$O', 'C0'),
@@ -151,7 +158,7 @@ def figure_models(refresh=False):
         prediction_lrs = np.array([stars.rebin(wavelength, ratio, b)[0] for b in data['bins']])
         prediction_f15 = photon_weighted_depth(wavelength, ratio, models['stellar_flux'], *response)
         chi2_lrs = np.sum(((prediction_lrs-data['fpfs'])/data['err'])**2)
-        chi2_f15 = ((prediction_f15-observed_f15)/error_f15)**2
+        chi2_f15 = -2*observation_loglike(photometry, np.array([prediction_f15]))
         chi2 = float(chi2_lrs+chi2_f15)
         reduced_chi2 = chi2/degrees_of_freedom
         handle, = spectrum_ax.plot(centers, ratio*1.e6, color=color, lw=1.7,
@@ -181,7 +188,7 @@ def figure_models(refresh=False):
                                fmt='o', color='black', markersize=3, elinewidth=1, capsize=2,
                                label='MIRI LRS (Wachiraphan+25)', zorder=5)
     f15 = spectrum_ax.errorbar((13.6+16.5)/2, observed_f15*1.e6, xerr=(16.5-13.6)/2,
-                               yerr=error_f15*1.e6, fmt='s', color=F1500W_COLOR, markersize=6,
+                               yerr=observation_yerr(photometry)*1.e6, fmt='s', color=F1500W_COLOR, markersize=6,
                                elinewidth=1, capsize=2, label='MIRI F1500W (Ih+2026; DDT)', zorder=5)
     pt_ax.set(xlabel='Temperature (K)', ylabel='Pressure (bar)', yscale='log', ylim=(1.5e-1, 1.e-6))
     spectrum_ax.set(xlabel=r'Wavelength ($\mu$m)', ylabel='Planet-to-star flux (ppm)', xlim=(4.8, 17.5))
@@ -201,7 +208,7 @@ def figure_models(refresh=False):
     content_top = fig.get_tightbbox(fig.canvas.get_renderer()).y1
     export_bbox = Bbox.from_bounds(0., 0., fig.get_figwidth(),
                                   min(fig.get_figheight(), content_top + .06))
-    output = ROOT/'figures/present/figure_models.png'
+    output = PRESENT_FIGURE_DIR/'figure_models.png'
     summary['frames'] = []
     for count in range(5):
         for i, artists in enumerate(model_artists):
@@ -232,7 +239,7 @@ def figure_retrieval(refresh=False):
     from figure_joint import load_posteriors, spectral_bands, scenario_cases
     from retrieval_run_joint import JointRetrieval
 
-    directory = ROOT/'pymultinest_joint/nonrv_gp_v1'
+    directory = RESULTS_DIR
     cases = scenario_cases(16)
     posteriors = load_posteriors(directory, cases)
     name = 'atm_16_F1500W_obs'
@@ -243,7 +250,7 @@ def figure_retrieval(refresh=False):
     # Reuse the original figure's fingerprint-checked spectral cache. It includes
     # all three datasets, but this figure draws only the combined-case bands.
     bands, fingerprint = spectral_bands(
-        run, posteriors, ROOT/'figures/joint/figure_joint_spectra.npz',
+        run, posteriors, JOINT_FIGURE_DIR/'figure_joint_spectra.npz',
         max_spectra=0, seed=1445, refresh=refresh, cases=cases)
     lower, median, upper = bands[name]  # Already in ppm; pointwise +/-1 sigma.
     wavelength = (run.wavelength[:-1]+run.wavelength[1:])/2
@@ -274,7 +281,7 @@ def figure_retrieval(refresh=False):
             (True, F1500W_COLOR, 's', 6, 'MIRI F1500W (Ih+2026; DDT)')):
         mask = data['photometric'] == photometric
         spectrum_ax.errorbar(data['wv'][mask], data['fpfs'][mask]*1.e6,
-                             xerr=data['wv_err'][mask], yerr=data['err'][mask]*1.e6,
+                             xerr=data['wv_err'][mask], yerr=observation_yerr(data, mask)*1.e6,
                              fmt=marker, color=color, markersize=size, elinewidth=1,
                              capsize=2, label=label, zorder=5)
     spectrum_ax.set(xlabel=r'Wavelength ($\mu$m)', ylabel='Planet-to-star flux (ppm)',
@@ -285,7 +292,7 @@ def figure_retrieval(refresh=False):
     bins = np.arange(-5., 2.801, .4)
     pressure_ax.hist(total_pressure, bins=bins, density=True, histtype='step',
                      color='C0', lw=3, label='')
-    pressure_ax.axvline(np.quantile(total_pressure, .95), color='C0', ls=':', lw=2)
+    pressure_ax.axvline(np.quantile(total_pressure, .975), color='C0', ls=':', lw=2)
     pressure_ax.hist(total_pressure_prior, bins=bins, density=True, histtype='step',
                      color='black', ls='--', lw=2.5, label='')
     pressure_ax.set(xlabel=r'Total surface pressure (bar)',
@@ -299,7 +306,7 @@ def figure_retrieval(refresh=False):
     #                            Line2D([], [], color='black', lw=1.5, ls='--', label='Prior')],
     #                    loc='upper right', bbox_to_anchor=(1., 1.), frameon=False)
 
-    output = ROOT/'figures/present/figure_retrieval.png'
+    output = PRESENT_FIGURE_DIR/'figure_retrieval.png'
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=300)
     output.with_suffix('.json').write_text(json.dumps(dict(
@@ -308,19 +315,20 @@ def figure_retrieval(refresh=False):
         prior_gas_columns=gas_columns, prior_log10_partial_pressure_bounds=np.c_[prior_low, prior_high].tolist(),
         total_pressure_definition='log10(sum of the four sampled partial pressures in bar)',
         spectral_quantiles=[.15865525393145707, .5, .8413447460685429],
-        total_pressure_95_upper_limit_bar=float(10.**np.quantile(total_pressure, .95))),
+        total_pressure_97p5_upper_limit_bar=float(10.**np.quantile(total_pressure, .975))),
         indent=2)+'\n')
     print(f'Saved {output}')
-    print(f'95% upper limit on total surface pressure: '
-          f'{10.**np.quantile(total_pressure, .95):.6g} bar')
+    print(f'97.5% upper limit on total surface pressure: '
+          f'{10.**np.quantile(total_pressure, .975):.6g} bar')
     return fig, (spectrum_ax, pressure_ax)
 
 
 def figure_gas_posteriors():
     """Match retrieval_16_present.pdf using the updated combined posterior."""
     name = 'atm_16_F1500W_obs'
-    directory = ROOT/'pymultinest_joint/nonrv_gp_v1'/name
+    directory = RESULTS_DIR/name
     metadata = json.loads((directory/'inputs.json').read_text())
+    require_current_fit(metadata)
     posterior_file = directory/(name+'post_equal_weights.dat')
     samples = np.atleast_2d(np.loadtxt(posterior_file))
     plt.rcParams.update({'font.size': 14})
@@ -349,14 +357,15 @@ def figure_gas_posteriors():
         label_x = {'right': .98, 'center': .5, 'left': .02}[alignment]
         ax.text(label_x, .98, rf'$\mathrm{{{formula}}}$',
                 size=15, color=color, transform=ax.transAxes, ha=alignment, va='top')
-        upper = float(np.quantile(values, .95))
+        upper = float(np.quantile(values, .975))
         ax.axvline(upper, color='black', lw=1)
-        ax.text(upper, ax.get_ylim()[1]*.55, '95% UL', rotation=-90, size=12)
+        ax.text(upper, ax.get_ylim()[1]*.55, '97.5% UL', rotation=-90, size=12,
+                va='center', ha='left')
         ax.text(note_x, .01, rf'$<{upper:.1f}$', size=17, color=color,
                 transform=ax.transAxes, ha='center', va='bottom')
         limits[key] = dict(log10_upper_limit=upper, upper_limit_bar=float(10.**upper))
     axes[0].set_ylabel('Probability Density', labelpad=10)
-    output = ROOT/'figures/present/retrieval_joint_16_present'
+    output = PRESENT_FIGURE_DIR/'retrieval_joint_16_present'
     output.parent.mkdir(parents=True, exist_ok=True)
     for extension in ('.pdf', '.png'):
         path = output.with_suffix(extension)
@@ -364,7 +373,7 @@ def figure_gas_posteriors():
         print(f'Saved {path}')
     output.with_suffix('.json').write_text(json.dumps(dict(
         case=name, posterior_file=str(posterior_file), posterior_samples=len(samples),
-        upper_limit_probability=.95, partial_pressure_upper_limits=limits), indent=2)+'\n')
+        upper_limit_probability=.975, partial_pressure_upper_limits=limits), indent=2)+'\n')
     return fig, axes
 
 
@@ -372,7 +381,7 @@ def _baseline_joint(name='atm_16_F1500W_obs'):
     """Load an atmospheric joint-system-prior case in canonical parameter order."""
     from figure_joint import load_posteriors
     from retrieval_run_joint import JointRetrieval
-    directory = ROOT/'pymultinest_joint/nonrv_gp_v1'
+    directory = RESULTS_DIR
     entry = load_posteriors(directory, cases=[(name, '', 'C0')])[name]
     metadata = entry['metadata']
     run = JointRetrieval(chain=Path(metadata['system_prior']['source_csv']).parent,
@@ -392,7 +401,7 @@ def _joint_profiles(run, entry, refresh=False):
     fingerprint = json.dumps(dict(version=1, posterior_sha256=sha256(entry['posterior_file']),
         grid_stat=[grid_stat.st_size, grid_stat.st_mtime_ns], count=150, seed=1445), sort_keys=True)
     suffix = 'f1500w' if entry['metadata']['case'] == 'atm_F1500W_obs' else '16'
-    cache = ROOT/f'figures/present/joint_{suffix}_profiles.npz'
+    cache = PRESENT_FIGURE_DIR/f'joint_{suffix}_profiles.npz'
     if cache.exists() and not refresh:
         with np.load(cache, allow_pickle=False) as saved:
             if saved['fingerprint'].item() == fingerprint:
@@ -419,7 +428,8 @@ def _joint_profiles(run, entry, refresh=False):
 
 
 def _save_joint_figure(fig, stem, description):
-    output = ROOT/'figures/present'/stem
+    description = dict(description, fit_tag=FIT_TAG)
+    output = PRESENT_FIGURE_DIR/stem
     output.parent.mkdir(parents=True, exist_ok=True)
     for extension in ('.pdf', '.png'):
         path = output.with_suffix(extension)
@@ -460,11 +470,16 @@ def _figure_fit_posteriors(atm_name, stem, refresh=False):
         ax.grid(alpha=.4)
 
     def upper_limit(ax, values, color, note_x=.3):
-        limit = float(np.quantile(values, .95))
+        limit = float(np.quantile(values, .975))
         ax.axvline(limit, color='black', lw=1)
-        ax.text(limit, ax.get_ylim()[1]*.62, '95% UL', rotation=-90, size=8)
-        ax.text(note_x, .01, rf'$<{limit:.1f}$', size=13, color=color,
-                transform=ax.transAxes, ha='center', va='bottom')
+        ax.text(limit, ax.get_ylim()[1]*.55, '97.5% UL', rotation=-90, size=8,
+                va='center', ha='left')
+        rounded_limit = round(limit, 1)
+        if rounded_limit == 0:
+            rounded_limit = 0.  # Avoid displaying a rounded negative zero.
+        ax.text(note_x, .01, rf'$<{rounded_limit:.1f}$', size=13, color=color,
+                transform=ax.transAxes, ha='center', va='bottom',
+                bbox=dict(facecolor='white', edgecolor='none', alpha=.8, pad=.2) if color == 'black' else None)
         return dict(log10_upper_limit=limit, upper_limit_bar=float(10.**limit))
 
     ax = top_axes[0]
@@ -507,7 +522,7 @@ def _figure_fit_posteriors(atm_name, stem, refresh=False):
     _save_joint_figure(fig, stem, dict(case=atm_name,
         posterior_file=str(entry['posterior_file']), posterior_samples=len(samples),
         profile_method='Grid interpolation: log pressure, linear temperature; same seven model coordinates',
-        profile_posterior_indices=profile_indices.tolist(), upper_limit_probability=.95,
+        profile_posterior_indices=profile_indices.tolist(), upper_limit_probability=.975,
         pressure_upper_limits=limits, prior_draws=len(total_prior)))
     return fig, (top_axes, gas_axes, nuisance_axes)
 
@@ -531,11 +546,11 @@ def _figure_fit_spectra(atm_name, rock_name, stem, refresh=False):
     from joint_system_prior import sha256
 
     run, entry = _baseline_joint(atm_name)
-    directory = ROOT/'pymultinest_joint/nonrv_gp_v1'
+    directory = RESULTS_DIR
     cases = scenario_cases(16)
     posteriors = load_posteriors(directory, cases)
     atmospheric, fingerprint = spectral_bands(run, posteriors,
-        ROOT/'figures/joint/figure_joint_spectra.npz', 0, 1445, refresh, cases)
+        JOINT_FIGURE_DIR/'figure_joint_spectra.npz', 0, 1445, refresh, cases)
     rock_file = directory/rock_name/(rock_name+'post_equal_weights.dat')
     rock_metadata = json.loads((directory/rock_name/'inputs.json').read_text())
     rock_data = np.atleast_2d(np.loadtxt(rock_file))
@@ -555,7 +570,7 @@ def _figure_fit_spectra(atm_name, rock_name, stem, refresh=False):
         return (1-albedo)*np.pi*stars.blackbody_cgs(day_temperature, wavelength/1.e4)/stellar_flux*ror**2*1.e6
 
     suffix = 'f1500w' if atm_name == 'atm_F1500W_obs' else '16'
-    cache = ROOT/f'figures/present/joint_{suffix}_rock_spectra.npz'
+    cache = PRESENT_FIGURE_DIR/f'joint_{suffix}_rock_spectra.npz'
     rock_fingerprint = json.dumps(dict(version=1, posterior_sha256=sha256(rock_file),
         stellar_sha256=sha256(run.stellar_file), planets_sha256=sha256(ROOT/'planets.py'),
         wavelength=run.wavelength.tolist(), quantiles=[.15865525393145707, .5, .8413447460685429]),
@@ -601,7 +616,7 @@ def _figure_fit_spectra(atm_name, rock_name, stem, refresh=False):
         if not np.any(mask):
             continue
         data_handles.append(ax.errorbar(data['wv'][mask], data['fpfs'][mask]*1.e6,
-            xerr=data['wv_err'][mask], yerr=data['err'][mask]*1.e6, fmt=marker,
+            xerr=data['wv_err'][mask], yerr=observation_yerr(data, mask)*1.e6, fmt=marker,
             color=color, ms=3 if not photometric else 5, elinewidth=.6, capsize=1.5, label=label, zorder=5))
     # The display response is weighted by stellar photon flux, matching the
     # photometric observation operator; its height is arbitrary for display.

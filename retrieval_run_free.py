@@ -2,7 +2,7 @@
 
 Run in the ltt environment (or its HPC equivalent):
   python retrieval_run_free.py --check-only --report validation/free_setup.json
-  mpiexec -n 16 python retrieval_run_free.py --tag free_v1
+  mpiexec -n 16 python retrieval_run_free.py --tag final_gp_v1
 
 No climate solver or precomputed emission grid is used. See FREE_RETRIEVAL.md.
 """
@@ -27,7 +27,7 @@ import pandas as pd
 from scipy.optimize import brentq
 from scipy.special import ndtr, ndtri, roots_hermitenorm
 
-from joint_system_prior import JointSystemPrior, ROOT, DEFAULT_CHAIN, sha256
+from joint_system_prior import JointSystemPrior, ROOT, DEFAULT_CHAIN, FIT_TAG, sha256
 
 PARAMETERS = ['log10PH2O', 'log10PCO2', 'log10PO2', 'log10PSO2', 'albedo',
               'T_ref', 'log10P_break', 'slope_up', 'slope_lo', 'Teff', 'R_planet_star']
@@ -94,7 +94,7 @@ class FreeRetrieval:
         import planets
         from photochem.extensions import hotrocks
         from photochem.utils import stars
-        from utils import make_lrs_data, make_F1500W_data_real, append_data_dicts
+        from utils import make_lrs_data, make_joint_photometry, append_data_dicts
         self.stars = stars
         self.star, self.planet = planets.LTT1445A, planets.LTT1445Ab
         self.database = Path(database or ROOT/'picasofiles/opacities_photochem_0.1_250.0_R15000.db').resolve()
@@ -131,9 +131,7 @@ class FreeRetrieval:
         self.wavelength = stars.grid_at_resolution(float(self.picaso.opa.wave.min()),
                                                    float(self.picaso.opa.wave.max()), 100)
         self.response = np.loadtxt(self.response_file).T
-        photometry = make_F1500W_data_real()
-        photometry['fpfs'] = np.array([self.system.eclipse_mean])
-        photometry['err'] = np.array([self.system.eclipse_sd])
+        photometry = make_joint_photometry(self.system)
         self.data = append_data_dicts(make_lrs_data(self.lrs_file), photometry)
         from utils import photon_weighted_depth
         photon_weighted_depth(self.wavelength, np.ones(len(self.wavelength)-1),
@@ -187,12 +185,13 @@ class FreeRetrieval:
             violation = np.maximum(self.temperature_bounds[0]-temperature, 0.)**2 \
                         + np.maximum(temperature-self.temperature_bounds[1], 0.)**2
             return float(-1.e10-np.sum(violation))
-        return float(-.5*np.sum(((self.data['fpfs']-prediction)/self.data['err'])**2))
+        from utils import observation_loglike
+        return observation_loglike(self.data, prediction)
 
     def metadata(self):
         from importlib.metadata import version
         stat = self.database.stat()
-        return dict(case=CASE, param_names=PARAMETERS, independent_uniform_bounds=BOUNDS.tolist(),
+        return dict(case=CASE, fit_tag=FIT_TAG, param_names=PARAMETERS, independent_uniform_bounds=BOUNDS.tolist(),
             system_prior=self.system.metadata(), stellar_marginal='Conditional CDF inversion with Gaussian quadrature',
             quadrature_order=self.stellar_prior.order, temperature_bounds_K=self.temperature_bounds,
             pressure_bounds_bar=self.pressure_bounds, pressure_top_bar=self.pressure_top, nz=self.nz,
@@ -211,7 +210,7 @@ class FreeRetrieval:
                            ('retrieval_run_free.py', 'joint_system_prior.py', 'utils.py', 'planets.py')},
             versions={name: version(name) for name in ('numpy', 'scipy', 'picaso', 'photochem')},
             python_version=sys.version,
-            likelihood='Independent Gaussian errors; additive normalization omitted as in joint runner',
+            likelihood='Gaussian LRS and two-piece Gaussian F1500W; constant normalization omitted as in joint runner',
             data={k: v.tolist() for k, v in self.data.items()})
 
     def check(self):
@@ -253,7 +252,7 @@ def main():
     parser.add_argument('--chain', type=Path, default=DEFAULT_CHAIN)
     parser.add_argument('--database', type=Path)
     parser.add_argument('--response', type=Path)
-    parser.add_argument('--tag', default='free_v1')
+    parser.add_argument('--tag', default=FIT_TAG)
     parser.add_argument('--n-live-points', type=int, default=1000)
     parser.add_argument('--nz', type=int, default=60)
     parser.add_argument('--seed', type=int, default=1445)

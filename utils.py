@@ -89,6 +89,9 @@ def append_data_dicts(data_dict1, data_dict2):
     data_dict['bins'] = np.vstack((data_dict1['bins'], data_dict2['bins']))
     for key in ['fpfs', 'err', 'wv', 'wv_err']:
         data_dict[key] = np.concatenate((data_dict1[key], data_dict2[key]))
+    for key in ('err_lower', 'err_upper'):
+        if key in data_dict1 or key in data_dict2:
+            data_dict[key] = np.concatenate([d.get(key, d['err']) for d in (data_dict1, data_dict2)])
     if 'photometric' in data_dict1 or 'photometric' in data_dict2:
         data_dict['photometric'] = np.concatenate([
             d.get('photometric', np.zeros(len(d['wv']), dtype=bool))
@@ -100,6 +103,43 @@ def append_data_dicts(data_dict1, data_dict2):
         data_dict[key] = data_dict[key][order]
 
     return data_dict
+
+
+def make_joint_photometry(system):
+    """Final system-fit measurement; asymmetric errors remain in flux-ratio units."""
+    data = make_F1500W_data_real()  # Reuse display bounds, not the legacy depth.
+    data['fpfs'] = np.array([system.eclipse_median])
+    data['err_lower'] = np.array([system.eclipse_err_lower])
+    data['err_upper'] = np.array([system.eclipse_err_upper])
+    # Compatibility summary only; new likelihoods and plots use both sides.
+    data['err'] = (data['err_lower']+data['err_upper'])/2
+    return data
+
+
+def observation_yerr(data, mask=None):
+    """Matplotlib error array, retaining asymmetric measurement uncertainties."""
+    errors = np.array([data.get('err_lower', data['err']), data.get('err_upper', data['err'])])
+    return errors if mask is None else errors[:, mask]
+
+
+def observation_loglike(data, prediction):
+    """Independent normal/two-piece normal errors, with constant normalization omitted.
+
+    Below the measured central depth use the lower uncertainty, above it use
+    the upper uncertainty. The split-normal center is the chain median, a
+    small-asymmetry approximation, not an exact reconstruction of its density.
+    Constants cancel only between models fitted to the same observations.
+    """
+    prediction = np.asarray(prediction, dtype=float)
+    if prediction.shape != np.asarray(data['fpfs']).shape:
+        raise ValueError('Prediction shape does not match observations')
+    if not np.isfinite(prediction).all():
+        return -1.e100
+    sigma = np.where(prediction < data['fpfs'], data.get('err_lower', data['err']),
+                     data.get('err_upper', data['err']))
+    if not np.isfinite(sigma).all() or np.any(sigma <= 0):
+        raise ValueError('Measurement uncertainties must be finite and positive')
+    return float(-.5*np.sum(((prediction-data['fpfs'])/sigma)**2))
 
 
 @lru_cache(maxsize=4)

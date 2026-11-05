@@ -20,7 +20,11 @@ import numpy as np
 import retrieval_run as legacy
 import planets
 from retrieval_run_joint import JointRetrieval
-from joint_system_prior import ROOT, sha256
+from joint_system_prior import ROOT, RESULTS_DIR, sha256, require_current_fit
+from utils import observation_yerr
+
+# Figures overwrite their established paths, independently of the fit tag.
+JOINT_FIGURE_DIR = ROOT / 'figures/joint'
 
 def scenario_cases(lrs_bins=16):
     return ((f'atm_{lrs_bins}', 'LRS alone', 'C0'),
@@ -42,6 +46,7 @@ def load_posteriors(directory, cases=CASES):
         metadata_file = folder/'inputs.json'
         posterior_file = folder/(name+'post_equal_weights.dat')
         metadata = json.loads(metadata_file.read_text())
+        require_current_fit(metadata)
         data = np.atleast_2d(np.loadtxt(posterior_file))
         if data.shape[1] != len(metadata['param_names'])+1 or not np.all(np.isfinite(data)):
             raise ValueError(f'Invalid equal-weight posterior: {posterior_file}')
@@ -147,7 +152,7 @@ def make_figure(run, posteriors, bands, cases=CASES, lrs_bins=16):
     spectrum_ax.errorbar(lrs['wv'], lrs['fpfs']*1.e6, yerr=lrs['err']*1.e6,
                          xerr=lrs['wv_err'], fmt='o', color='0.1', ms=3.1,
                          mew=.7, elinewidth=.8, capsize=1.6, label='MIRI LRS (Wachiraphan+25)', zorder=5)
-    spectrum_ax.errorbar(f1500['wv'], f1500['fpfs']*1.e6, yerr=f1500['err']*1.e6,
+    spectrum_ax.errorbar(f1500['wv'], f1500['fpfs']*1.e6, yerr=observation_yerr(f1500)*1.e6,
                          xerr=f1500['wv_err'], fmt='D', color='0.1', mfc='white', ms=4.8,
                          mew=.9, elinewidth=1., capsize=2., label='MIRI F1500W (this work)', zorder=6)
     spectrum_ax.set(xlim=(4.8, 17.5), ylim=(0., 240.),
@@ -206,7 +211,7 @@ def make_figure(run, posteriors, bands, cases=CASES, lrs_bins=16):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--results', type=Path, default=ROOT/'pymultinest_joint/nonrv_gp_v1')
+    parser.add_argument('--results', type=Path, default=RESULTS_DIR)
     parser.add_argument('--lrs-bins', type=int, choices=(8, 16), default=16)
     parser.add_argument('--output-prefix', type=Path, help='Default: figures/joint/figure_joint[_8]')
     parser.add_argument('--max-spectra', type=int, default=0,
@@ -219,23 +224,16 @@ def main():
     cases = scenario_cases(args.lrs_bins)
     if args.output_prefix is None:
         suffix = '_8' if args.lrs_bins == 8 else ''
-        args.output_prefix = ROOT / f'figures/joint/figure_joint{suffix}'
+        args.output_prefix = JOINT_FIGURE_DIR / f'figure_joint{suffix}'
     posteriors = load_posteriors(args.results, cases)
     combined_metadata = posteriors[f'atm_{args.lrs_bins}_F1500W_obs']['metadata']
     run = JointRetrieval(chain=Path(combined_metadata['system_prior']['source_csv']).parent,
                          response=combined_metadata['response_file'], lrs_bins=args.lrs_bins)
     # Fail clearly if the plotting model no longer matches the saved fit.
     for name, entry in posteriors.items():
-        runner_changed = False
         for filename, expected in entry['metadata']['source_sha256'].items():
             if sha256(ROOT/filename) != expected:
-                if filename == 'retrieval_run_joint.py':
-                    # Bin-selection additions change the runner's source hash,
-                    # not the physical model. Verify saved data and likelihoods
-                    # below rather than invalidating old 16-bin/F1500W outputs.
-                    runner_changed = True
-                else:
-                    raise ValueError(f'Model source changed since {name}: {filename}')
+                raise ValueError(f'Model source changed since {name}: {filename}')
         if sha256(run.response_file) != entry['metadata']['response_sha256']:
             raise ValueError(f'Response changed since {name}')
         if sha256(run.system.source) != entry['metadata']['system_prior']['source_sha256']:
@@ -248,12 +246,6 @@ def main():
         for key, values in case['data_dict'].items():
             if not np.array_equal(values, np.asarray(entry['metadata']['data'][key])):
                 raise ValueError(f'Observation changed since {name}: {key}')
-        if runner_changed:
-            ids = np.linspace(0, len(entry['samples'])-1, 5, dtype=int)
-            actual = [case['loglike'](entry['samples'][i]) for i in ids]
-            if not np.allclose(actual, entry['loglike'][ids], rtol=0, atol=1.e-8):
-                raise ValueError(f'Updated runner does not reproduce {name}')
-            print(f'Updated runner reproduces saved {name} likelihoods.', flush=True)
     args.output_prefix.parent.mkdir(parents=True, exist_ok=True)
     cache = args.output_prefix.parent/(args.output_prefix.name+'_spectra.npz')
     bands, fingerprint = spectral_bands(run, posteriors, cache, args.max_spectra,

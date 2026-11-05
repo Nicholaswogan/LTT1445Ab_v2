@@ -50,8 +50,10 @@ class FreeForwardTests(unittest.TestCase):
         self.assertEqual(len(PARAMETERS), 11)
         np.testing.assert_array_equal(BOUNDS[:5], [[-7, 2], [-7, 2], [-5, 2], [-7, 2], [0, .4]])
         self.assertEqual(len(self.retrieval.data['fpfs']), 17)
-        np.testing.assert_allclose(self.retrieval.data['fpfs'][self.retrieval.data['photometric']], [153.120022778e-6])
-        np.testing.assert_allclose(self.retrieval.data['err'][self.retrieval.data['photometric']], [12.011308357e-6])
+        photometric = self.retrieval.data['photometric']
+        np.testing.assert_allclose(self.retrieval.data['fpfs'][photometric], [157.4729237374e-6])
+        np.testing.assert_allclose(self.retrieval.data['err_lower'][photometric], [17.313102253804e-6])
+        np.testing.assert_allclose(self.retrieval.data['err_upper'][photometric], [17.816033503901e-6])
         x = self.example()
         before = self.retrieval.atmosphere(x)
         x[0] = -2.

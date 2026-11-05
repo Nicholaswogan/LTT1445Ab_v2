@@ -1,32 +1,38 @@
 """Audit grid coverage and optionally run paired climate sensitivity calculations.
 
 Run from the repo root in conda env ltt. No sampling or grid files are changed.
-The rounded joint-fit CSV is used for diagnostics, never to manufacture priors.
+Uses unrounded final-fit draws for system diagnostics and sensitivity inputs.
 """
 import argparse
-import csv
 import json
 from pathlib import Path
 
 import h5py
 import numpy as np
+import pandas as pd
 from scipy.interpolate import RegularGridInterpolator
 
-SUMMARY = Path('data/LTT1445_Joint__Alltransiteclipse_binDDT60s_v2_e_w/ChainSummary_LTT1445_Joint__Alltransiteclipse_binDDT60s_v2_e_w.csv')
+from joint_system_prior import DEFAULT_CHAIN, DERIVED_DIR, sha256
 
 
 def audit():
     from astropy import constants as c
-    with SUMMARY.open() as f:
-        rows = {r['Parameter']: r for r in csv.DictReader(f)}
-    mean = lambda key: float(rows[key]['mean'])
-    sd = lambda key: float(rows[key]['sd'])
-    teq = mean('teff')/np.sqrt(2*mean('aor[0]'))
-    # Delta-method diagnostic only; covariance is unavailable in the summary.
-    teq_sd = teq*np.hypot(sd('teff')/mean('teff'), 0.5*sd('aor[0]')/mean('aor[0]'))
-    rho_earth = (c.M_earth/(4*np.pi*c.R_earth**3/3)).to('g/cm3').value
-    radius = (mean('m_pl[0]')*rho_earth/mean('density_pl[0]'))**(1/3)
-    ror = mean('ror[0]')
+    source, = DEFAULT_CHAIN.glob('MCMCResults*.csv')
+    draws = pd.read_csv(source)
+    mean = lambda key: float(draws[key].mean())
+    sd = lambda key: float(draws[key].std(ddof=1))
+    temperatures = draws.teff/np.sqrt(2*draws.aor__0)
+    teq, teq_sd = float(temperatures.mean()), float(temperatures.std(ddof=1))
+    radius = mean('r_pl__0')
+    ror = mean('ror__0')
+    diagnostics = []
+    for path in sorted(DEFAULT_CHAIN.glob('trace.trace/*/metadata.json')):
+        trace = json.loads(path.read_text())
+        stats = trace['_stats'][0]
+        divergence = np.asarray(stats['diverging'], dtype=bool)
+        tune = np.asarray(stats['tune'], dtype=bool)
+        diagnostics.append(dict(chain=int(path.parent.name), draws=len(divergence),
+            post_warmup_divergences=int(np.count_nonzero(divergence & ~tune))))
     grids = {}
     for filename in ('results/LTT1445Ab.h5', 'results/LTT1445Ab_hot.h5'):
         with h5py.File(filename) as f:
@@ -39,12 +45,12 @@ def audit():
                                    completed=int(np.count_nonzero(done)), total=int(done.size),
                                    converged=int(np.count_nonzero(converged)))
     return dict(
-        source=str(SUMMARY),
-        warning='Rounded marginal summaries: diagnostics only, not a joint posterior or valid radius-ratio prior.',
-        teq_zero_albedo_K=teq, teq_sd_ignoring_covariance_K=teq_sd,
-        mass_earth=mean('m_pl[0]'), radius_from_mean_mass_and_density_earth=radius,
-        gravity_ratio_to_grid=(mean('m_pl[0]')/2.73)*(1.34/radius)**2,
-        radius_ratio_rounded=ror, radius_ratio_sd_rounded=sd('ror[0]'),
+        source=str(source), source_sha256=sha256(source), sampling_diagnostics=diagnostics,
+        warning='All source draws retained, including flagged divergent transitions; review diagnostics with fit author.',
+        teq_zero_albedo_K=teq, teq_sd_K=teq_sd,
+        mass_earth=mean('m_pl__0'), radius_earth=radius, teff_K=mean('teff'),
+        gravity_ratio_to_grid=(mean('m_pl__0')/2.73)*(1.34/radius)**2,
+        radius_ratio=ror, radius_ratio_sd=sd('ror__0'),
         eclipse_area_ratio_to_legacy=(ror/0.0454)**2,
         stellar_logg_from_mean_mass_radius=float(np.log10(
             (c.G*c.M_sun*mean('m_star')/(c.R_sun*mean('r_star'))**2).to('cm/s2').value)),
@@ -58,11 +64,11 @@ def sensitivity(report, response_file=None):
     from photochem.extensions import hotrocks
     data = make_lrs_data('data/LTT1445Ab_Sparta_16.txt')
     teq = report['teq_zero_albedo_K']
-    radius = report['radius_from_mean_mass_and_density_earth']
+    radius = report['radius_earth']
     models = [('legacy', grid.NOMINAL_CLIMATE_MODEL),
               ('new_mass_radius', grid.initialize_model(mass=report['mass_earth'], radius=radius)[0])]
     sphinx = hotrocks.sphinx_interpolator('inputs/sphinx.h5')
-    w, fs = sphinx(3340., -0.34, 4.97, rescale_to_Teff=False)
+    w, fs = sphinx(report['teff_K'], -0.34, 4.97, rescale_to_Teff=False)
     fs = stars.rebin(stars.make_bins(w), fs, grid.WAVL)
     response = None if response_file is None else np.loadtxt(response_file).T
     with h5py.File('results/LTT1445Ab.h5') as f:
@@ -86,14 +92,16 @@ def sensitivity(report, response_file=None):
             grid.NOMINAL_CLIMATE_MODEL = model
             out = grid.model(x)
             convergence[label] = bool(out['converged'])
-            depths[label] = out['fp']/fs*report['radius_ratio_rounded']**2
+            if not out['converged']:
+                raise RuntimeError(f'Climate failed: {name}, {label}')
+            depths[label] = out['fp']/fs*report['radius_ratio']**2
             if label == 'legacy' and name in ('O2_CO2', 'CO2_between') and response is not None:
                 wh, fph, _ = model.fpfs_picaso(R=1000)
-                ws, fsh = sphinx(3340., -0.34, 4.97, rescale_to_Teff=False)
+                ws, fsh = sphinx(report['teff_K'], -0.34, 4.97, rescale_to_Teff=False)
                 fsh = stars.rebin(stars.make_bins(ws), fsh, wh)
                 high_resolution_f15 = float(photon_weighted_depth(
-                    wh, fph/fsh*report['radius_ratio_rounded']**2, fsh, *response))*1e6
-        depths['interpolated'] = interp(x)[0]/fs*report['radius_ratio_rounded']**2
+                    wh, fph/fsh*report['radius_ratio']**2, fsh, *response))*1e6
+        depths['interpolated'] = interp(x)[0]/fs*report['radius_ratio']**2
         binned = {key: rebin_spectra_to_data(grid.WAVL, val, data) for key, val in depths.items()}
         f15 = {key: (float(stars.rebin(grid.WAVL, val, np.array([13.6, 16.5]))[0])
                      if response is None else float(photon_weighted_depth(grid.WAVL, val, fs, *response)))
@@ -116,12 +124,13 @@ def sensitivity(report, response_file=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--sensitivity', action='store_true')
-    parser.add_argument('--response', type=Path)
-    parser.add_argument('--output', type=Path, default=Path('results/new_data_assessment.json'))
+    parser.add_argument('--response', type=Path, default=Path('inputs/F1500W_response.txt'))
+    parser.add_argument('--output', type=Path, default=DERIVED_DIR/'new_data_assessment.json')
     args = parser.parse_args()
     report = audit()
     if args.sensitivity:
         report['sensitivity'] = sensitivity(report, args.response)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2)+'\n')
     print(json.dumps(report, indent=2))
 

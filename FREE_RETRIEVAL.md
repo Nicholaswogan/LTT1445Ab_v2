@@ -1,9 +1,9 @@
 # Free-temperature LRS + F1500W retrieval
 
 `retrieval_run_free.py` fits the same observations as
-`pymultinest_joint/nonrv_gp_v1/atm_16_F1500W_obs`, calling PICASO directly
-instead of interpolating the climate grid. Existing runners and results are
-not modified. Use conda environment `ltt` locally, or an equivalent HPC setup.
+`pymultinest_joint/final_gp_v1/atm_16_F1500W_obs`, calling PICASO directly
+instead of interpolating the climate grid. Free-retrieval outputs are separate.
+Use conda environment `ltt` locally, or an equivalent HPC setup.
 
 ## Parameters and forward model
 
@@ -64,15 +64,16 @@ and its weak correlations with the fitted eclipse depths are neglected.
 The planetary surface spectrum is rebinned to R=100 over 4–25 microns. The
 eclipse ratio uses the sampled SPHINX Teff and Rp/Rstar. LRS predictions use
 rectangular wavelength-bin averages. F1500W uses the stellar-photon-weighted
-instrument response and the same 153.1200 +/- 12.0113 ppm Gaussian datum.
-The likelihood is -chi2/2, with the same omitted normalization as the joint run.
+instrument response and the same 157 +18/-17 ppm datum with a two-piece Gaussian likelihood.
+The likelihood is -chi2/2 using the appropriate side of the F1500W uncertainty,
+with the same omitted constant normalization as the joint run.
 
 ## Files required on the HPC
 
 Copy the Python sources and these actual inputs (resolve local symlinks):
 
 - `data/LTT1445Ab_Sparta_16.txt`
-- `data/LTT1445_Joint__Alltransiteclipse_binDDT60s_v2_e_w/MCMCResults*.csv`
+- `data/LTT1445_Joint__Alltransiteclipse_binDDT60s_v2_12758GP_RVGP_e_w/MCMCResults*.csv`
 - `inputs/sphinx.h5`
 - `inputs/F1500W_response.txt`
 - `picasofiles/opacities_photochem_0.1_250.0_R15000.db`
@@ -109,7 +110,7 @@ mpiexec -n 2 python retrieval_run_free.py --check-only
 Then start the retrieval, for example:
 
 ```bash
-mpiexec -n 16 python retrieval_run_free.py --tag free_v1 --n-live-points 1000
+mpiexec -n 16 python retrieval_run_free.py --tag final_gp_v1 --n-live-points 1000
 ```
 
 Use your cluster's `srun` equivalent if required. Request one CPU per MPI rank;
@@ -123,7 +124,7 @@ handles its own parallel output. The script refuses an existing case directory
 and uses short relative native filenames to avoid Fortran filename-buffer
 limits. It does not resume earlier runs.
 
-Outputs are under `pymultinest_free/free_v1/atmfree_16_F1500W_obs/`:
+Outputs are under `pymultinest_free/final_gp_v1/atmfree_16_F1500W_obs/`:
 
 - `inputs.json`: priors, data, physical assumptions, versions, input hashes,
   opacity database path/size/mtime, MPI rank count, and run settings.

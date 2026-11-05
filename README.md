@@ -39,11 +39,11 @@ cd ..
 ## Observed F1500W inference
 
 Use [JOINT_RETRIEVAL.md](JOINT_RETRIEVAL.md) and `retrieval_run_joint.py` for the
-selected non-RV-GP chain, 153.12 +/- 12.01 ppm F1500W depth, correlated system
+final photometric/RV GP chain, 157 +18/-17 ppm F1500W depth, correlated system
 constraints, and explicit Teq truncation. Run in the `ltt` conda environment.
 
-`retrieval_run.py` preserves the historical cases and settings. The initial
-grid assessment and earlier setup are recorded in [NEW_DATA.md](NEW_DATA.md).
+`retrieval_run.py` preserves the historical cases and settings. The current
+grid assessment is described in [NEW_DATA.md](NEW_DATA.md).
 
 For a free temperature-profile retrieval of the combined 16-bin LRS and
 F1500W observations, use `retrieval_run_free.py`; MPI/HPC instructions and

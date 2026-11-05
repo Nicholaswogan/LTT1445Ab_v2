@@ -6,7 +6,7 @@ Run in conda env ltt, from the repository root:
     python posterior_climate.py --plot-only     # plot saved 1000-sample run
     python posterior_climate.py --case f1500w   # F1500W-only, separate output
 
-Saves HDF5 plus a readable JSON sidecar in results/posterior_climate_1000.*.
+Saves HDF5 plus a readable JSON sidecar in results/final_gp_v1/.
 Checkpoints every 25 completed samples; failed samples are retained and flagged.
 
 Uses the original grid's fixed mass, radius, and stellar irradiation shape.
@@ -31,11 +31,10 @@ import time
 import numpy as np
 import h5py
 
-ROOT = Path(__file__).resolve().parent
-DEFAULT_POSTERIOR = ROOT / ('pymultinest_joint/nonrv_gp_v1/atm_16_F1500W_obs/'
-                           'atm_16_F1500W_obspost_equal_weights.dat')
-F1500W_POSTERIOR = ROOT / ('pymultinest_joint/nonrv_gp_v1/atm_F1500W_obs/'
-                         'atm_F1500W_obspost_equal_weights.dat')
+from joint_system_prior import ROOT, FIT_TAG, RESULTS_DIR, DERIVED_DIR, require_current_fit
+JOINT_FIGURE_DIR = ROOT / 'figures/joint'
+DEFAULT_POSTERIOR = RESULTS_DIR/'atm_16_F1500W_obs/atm_16_F1500W_obspost_equal_weights.dat'
+F1500W_POSTERIOR = RESULTS_DIR/'atm_F1500W_obs/atm_F1500W_obspost_equal_weights.dat'
 PARAMETERS = ['log10PH2O', 'log10PCO2', 'log10PO2', 'log10PSO2', 'log10chi',
               'albedo', 'Teq', 'Teff', 'R_planet_star']
 
@@ -102,6 +101,7 @@ def save_results(output, provenance, results, summary=None):
     temporary = output.with_suffix('.tmp.h5')
     with h5py.File(temporary, 'w') as f:
         f.attrs['schema_version'] = 1
+        f.attrs['fit_tag'] = FIT_TAG
         f.attrs['run_finished'] = report['run_finished']
         f.attrs['requested_samples'] = provenance['requested_samples']
         f.attrs['completed_samples'] = len(rows)
@@ -225,8 +225,8 @@ def main():
     args = parser.parse_args()
     args.posterior = args.posterior or (F1500W_POSTERIOR if args.case == 'f1500w' else DEFAULT_POSTERIOR)
     suffix = '_F1500W_only' if args.case == 'f1500w' else ''
-    default_output = ROOT / f'results/posterior_climate{suffix}_{args.samples}.h5'
-    args.figure_prefix = args.figure_prefix or ROOT / f'figures/joint/figure_joint_albedos{suffix}'
+    default_output = DERIVED_DIR / f'posterior_climate{suffix}_{args.samples}.h5'
+    args.figure_prefix = args.figure_prefix or JOINT_FIGURE_DIR / f'figure_joint_albedos{suffix}'
     if args.samples < 1 or args.workers < 1:
         parser.error('Sample and worker counts must be positive')
     if args.plot_only:
@@ -234,6 +234,7 @@ def main():
                      args.figure_prefix)
         return
     metadata = json.loads((args.posterior.parent / 'inputs.json').read_text())
+    require_current_fit(metadata)
     posterior = np.atleast_2d(np.loadtxt(args.posterior))
     posterior = posterior[:, [metadata['param_names'].index(p) for p in PARAMETERS]]
     if args.samples > len(posterior):
@@ -247,7 +248,7 @@ def main():
     output.parent.mkdir(parents=True, exist_ok=True)
     provenance = dict(posterior=str(args.posterior.resolve()), posterior_sha256=hashlib.sha256(
         args.posterior.read_bytes()).hexdigest(), seed=args.seed, param_names=PARAMETERS,
-        requested_samples=args.samples, workers=args.workers, case=args.case,
+        requested_samples=args.samples, workers=args.workers, case=args.case, fit_tag=FIT_TAG,
         selected_posterior_indices=indices.tolist(), source_inputs=metadata,
         script_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         assumptions='Original grid mass/radius/stellar shape; no PICASO; one native thread per process.')

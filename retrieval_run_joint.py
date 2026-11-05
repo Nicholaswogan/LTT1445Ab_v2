@@ -1,4 +1,4 @@
-"""First-pass retrievals with the non-RV-GP joint fit and truncated Teq support.
+"""Retrievals with the final photometric/RV GP system fit and truncated Teq support.
 
 Run in conda environment ltt from the repository root. Historical cases and
 outputs in retrieval_run.py / pymultinest are never modified by this runner.
@@ -16,8 +16,8 @@ import numpy as np
 import retrieval_run as legacy
 import planets
 from photochem.utils import stars
-from utils import make_lrs_data, make_F1500W_data_real, append_data_dicts, photon_weighted_depth
-from joint_system_prior import JointSystemPrior, DEFAULT_CHAIN, ROOT, sha256
+from utils import make_lrs_data, make_joint_photometry, append_data_dicts, photon_weighted_depth, observation_loglike
+from joint_system_prior import JointSystemPrior, DEFAULT_CHAIN, ROOT, FIT_TAG, sha256
 
 def case_names(lrs_bins=16):
     if lrs_bins not in (8, 16):
@@ -50,11 +50,7 @@ class JointRetrieval:
         self.response = np.loadtxt(self.response_file).T
         photon_weighted_depth(self.wavelength, np.ones(len(self.wavelength)-1),
                               np.ones(len(self.wavelength)-1), *self.response)
-        # Copy the display/bin convention, without changing the legacy 148+/-11
-        # helper or any of its case definitions.
-        f1500 = make_F1500W_data_real()
-        f1500['fpfs'] = np.array([self.system.eclipse_mean])
-        f1500['err'] = np.array([self.system.eclipse_sd])
+        f1500 = make_joint_photometry(self.system)
         lrs = make_lrs_data(self.lrs_file)
         combined = append_data_dicts(lrs, f1500)
         datasets = {str(lrs_bins): lrs, 'F1500W_obs': f1500, f'{lrs_bins}_F1500W_obs': combined}
@@ -105,14 +101,14 @@ class JointRetrieval:
         prediction = predict(parameters)
         if not np.all(np.isfinite(prediction)):
             return -1.e100
-        # Same convention as historical runs; constants cancel for matched data.
-        return float(-.5*np.sum(((data['fpfs']-prediction)/data['err'])**2))
+        return observation_loglike(data, prediction)
 
     def metadata(self, validation):
         st = planets.LTT1445A
         return {
             'system_prior': self.system.metadata(), 'prior_validation': validation,
-            'system_fit': 'non-RV-GP, all transits and eclipses, planet b',
+            'fit_tag': FIT_TAG,
+            'system_fit': 'Final fit: RV GP and DD12758 photometric GP/exponential baseline; planet b',
             'photometry': 'photon-weighted planet/star flux integrals',
             'response_file': str(self.response_file), 'response_sha256': sha256(self.response_file),
             'response': self.response.tolist(),
@@ -126,7 +122,7 @@ class JointRetrieval:
             'grid_fixed_mass_earth': planets.LTT1445Ab.mass,
             'grid_fixed_radius_earth': planets.LTT1445Ab.radius,
             'grid_reused_without_new_climate_runs': True,
-            'likelihood': 'independent Gaussian errors; additive normalization omitted, as in legacy runs',
+            'likelihood': 'Independent Gaussian LRS errors and two-piece Gaussian F1500W errors; constant normalization omitted',
             'source_sha256': {name: sha256(ROOT/name) for name in
                               ['retrieval_run_joint.py', 'joint_system_prior.py', 'retrieval_run.py',
                                'utils.py', 'planets.py', 'gridutils.py']},
@@ -171,7 +167,7 @@ def main():
     parser.add_argument('--list-cases', action='store_true')
     parser.add_argument('--check-only', action='store_true', help='Validate prior and forward models without sampling')
     parser.add_argument('--report', type=Path, help='Optional JSON validation report for --check-only')
-    parser.add_argument('--tag', default='nonrv_gp_v1')
+    parser.add_argument('--tag', default=FIT_TAG)
     parser.add_argument('--n-live-points', type=int, default=1000)
     args = parser.parse_args()
     available_cases = case_names(args.lrs_bins)
@@ -206,8 +202,9 @@ def main():
                 parser.error('--report cannot target historical outputs or inputs')
             report.parent.mkdir(parents=True, exist_ok=True)
             report.write_text(json.dumps(metadata, indent=2)+'\n')
-        summary = {'depth_ppm': run.system.eclipse_mean*1.e6,
-                   'error_ppm': run.system.eclipse_sd*1.e6,
+        summary = {'depth_ppm': run.system.eclipse_median*1.e6,
+                   'error_lower_ppm': run.system.eclipse_err_lower*1.e6,
+                   'error_upper_ppm': run.system.eclipse_err_upper*1.e6,
                    'system_prior': run.system.metadata(), 'prior_validation': validation,
                    'forward_model_checks': metadata['forward_model_checks']}
         print(json.dumps(summary, indent=2))
