@@ -9,15 +9,15 @@ _ = threadpool_limits(limits=1)
 import planets
 from gridutils import make_grid
 
-def initialize_model(species=None, tidally_locked_dayside=True):
+def initialize_model(species=None, tidally_locked_dayside=True, *, mass=None, radius=None):
 
     # Make climate model
     pl = planets.LTT1445Ab
     st = planets.LTT1445A
     c = hotrocks.AdiabatClimateThermalEmission(
         Teq=pl.Teq,
-        M_planet=pl.mass,
-        R_planet=pl.radius,
+        M_planet=pl.mass if mass is None else mass,
+        R_planet=pl.radius if radius is None else radius,
         R_star=st.radius,
         Teff=st.Teff,
         metal=st.metal,

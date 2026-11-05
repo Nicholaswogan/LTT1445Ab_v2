@@ -35,3 +35,12 @@ do
 done
 cd ..
 ```
+
+## Observed F1500W inference
+
+Use [JOINT_RETRIEVAL.md](JOINT_RETRIEVAL.md) and `retrieval_run_joint.py` for the
+selected non-RV-GP chain, 153.12 +/- 12.01 ppm F1500W depth, correlated system
+constraints, and explicit Teq truncation. Run in the `ltt` conda environment.
+
+`retrieval_run.py` preserves the historical cases and settings. The initial
+grid assessment and earlier setup are recorded in [NEW_DATA.md](NEW_DATA.md).
