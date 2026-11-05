@@ -44,3 +44,7 @@ constraints, and explicit Teq truncation. Run in the `ltt` conda environment.
 
 `retrieval_run.py` preserves the historical cases and settings. The initial
 grid assessment and earlier setup are recorded in [NEW_DATA.md](NEW_DATA.md).
+
+For a free temperature-profile retrieval of the combined 16-bin LRS and
+F1500W observations, use `retrieval_run_free.py`; MPI/HPC instructions and
+prior definitions are in [FREE_RETRIEVAL.md](FREE_RETRIEVAL.md).
