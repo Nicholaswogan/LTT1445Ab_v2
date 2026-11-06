@@ -117,7 +117,31 @@ python posterior_climate.py --case f1500w
 Comparison figures and spectral caches are under `figures/joint/`;
 presentation outputs and caches are under `figures/present/`. New plots overwrite
 the previous figures at these paths.
-Derived climate HDF5/JSON files are under `results/final_gp_v1/`.
+Derived climate HDF5/JSON/CSV files are under `results/final_gp_v1/`.
+To extend the two existing 1,000-draw climate runs to 5,000 total draws:
+
+```sh
+conda activate ltt
+python posterior_climate.py --samples 5000 --extend results/final_gp_v1/posterior_climate_1000.h5
+python posterior_climate.py --case f1500w --samples 5000 --extend results/final_gp_v1/posterior_climate_F1500W_only_1000.h5
+```
+
+These commands update the existing files in place, retain the first 1,000
+calculations, and add 4,000 equal-weight draws sampled with replacement from
+the full weighted MultiNest `.txt` outputs. Repeated parameter vectors reuse
+their climate calculations. The filenames retain `_1000`, but the HDF5 metadata
+and row counts report 5,000. Repeat the same command to resume an interrupted
+extension. Source posterior hashes are checked before saved work is reused.
+Upon completion, each HDF5 gets matching JSON and CSV sidecars; CSV columns are
+`f_term,bond_albedo,surface_albedo`, including repeated draws with equal weight.
+Failed draws remain in the outputs (NaN diagnostics in CSV) and cause a nonzero
+exit status rather than being silently discarded.
+
+Resampling does not increase the retrieval's independent posterior information.
+The weighted combined/F1500W-only chains have effective sample sizes of about
+3,500/2,800. A 99.73% joint region from 5,000 draws leaves only about 14 draws
+outside it, so its boundary remains sensitive to sampling and density smoothing.
+
 Pressure upper limits are consistently the **97.5th posterior percentiles**,
 with matching annotations and metadata. Spectral shading remains the pointwise
 central one-sigma interval. Joint-density contour probabilities (68%, 95%)

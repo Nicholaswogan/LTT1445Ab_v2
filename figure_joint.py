@@ -16,6 +16,7 @@ matplotlib.use('Agg')
 from matplotlib import pyplot as plt
 from matplotlib.lines import Line2D
 import numpy as np
+from scipy.stats import qmc
 
 import retrieval_run as legacy
 import planets
@@ -144,8 +145,10 @@ def make_figure(run, posteriors, bands, cases=CASES, lrs_bins=16):
     # this is not a fitted bare-rock posterior or an evidence-weighted average.
     rock_parameters = np.r_[0., system_center]
     bare = legacy.model_rock_raw(rock_parameters, run.wavelength)*1.e6
+    flux = legacy.stars.equilibrium_temperature_inverse(system_center[0], 0.)
+    blackbody_temperature = float(legacy.hotrocks.bare_rock_dayside_temperature(flux, 0., 2/3))
     spectrum_ax.plot(wavelength, bare, color='k', lw=1.5, ls='-',
-                     label='Zero albedo blackbody', zorder=2)
+                     label=f'Zero albedo blackbody ({blackbody_temperature:.0f} K)', zorder=2)
 
     lrs = run.cases[f'atm_{lrs_bins}']['data_dict']
     f1500 = run.cases['atm_F1500W_obs']['data_dict']
@@ -169,20 +172,29 @@ def make_figure(run, posteriors, bands, cases=CASES, lrs_bins=16):
     posterior_panel(total_ax, total_pressure, np.arange(-5., 2.751, .25),
                     r'$\log_{10}(P_{\rm surf}/\mathrm{bar})$',
                     ylabel=True, cases=cases)
-    total_ax.text(.82, .97, 'Total\nsurface\npressure', transform=total_ax.transAxes,
-                  ha='center', va='top', multialignment='center')
+    prior = run.cases[f'atm_{lrs_bins}_F1500W_obs']['prior']
+    low, high = prior(np.zeros(9))[:4], prior(np.ones(9))[:4]
+    unit = qmc.Sobol(4, scramble=True, seed=1445).random_base2(20)
+    total_prior = np.log10(np.sum(10.**(low+unit*(high-low)), axis=1))
+    total_ax.hist(total_prior, bins=np.arange(-5., 2.751, .25), density=True,
+                  histtype='step', color='k', ls='--', lw=1.5)
+    total_ax.text(.06, .97, 'Total\nsurface\npressure', transform=total_ax.transAxes,
+                  ha='left', va='top', multialignment='center',
+                  bbox=dict(facecolor='white', edgecolor='none', pad=1.5), fontsize=12)
     total_upper_limits = {}
     for (name, _, color), pressure in zip(cases, total_pressure):
         upper_limit = float(np.quantile(10.**pressure, .975))
         total_upper_limits[name] = upper_limit
         total_ax.axvline(np.log10(upper_limit), color=color, ls=':', lw=1.5, alpha=0.8)
     total_ax.legend(handles=[Line2D([], [], color='k', ls=':', lw=2,
-                                    label='97.5%\nupper\nlimits')],
-                    loc='upper right', bbox_to_anchor=(1., .69),
-                    frameon=False, fontsize=11, handlelength=2.)
-    total_ax.set_xlim(left=-3)
+                                    label='97.5%\nupper lim.'),
+                            Line2D([], [], color='k', ls='--', lw=1.5, label='Prior')],
+                    loc='upper right', bbox_to_anchor=(1.035, 1.02),
+                    frameon=True, facecolor='none', edgecolor='none', framealpha=1.,
+                    fontsize=10.5, handlelength=2.)
+    total_ax.set_xlim(left=-3, right=3)
     if lrs_bins == 16:
-        total_ax.set_ylim(total_ax.get_ylim()[0], total_ax.get_ylim()[1]*0.8)
+        total_ax.set_ylim(total_ax.get_ylim()[0], total_ax.get_ylim()[1]*1.1)
     total_ax.set_xticks([-3, -2, -1, 0, 1, 2])
     partial_upper_limits = {}
     for i, (ax, (formula, parameter, lower)) in enumerate(zip(gas_axes, SPECIES)):
@@ -198,11 +210,14 @@ def make_figure(run, posteriors, bands, cases=CASES, lrs_bins=16):
         ax.set_xticks(np.arange(lower, 2.01, 2.))
     return fig, {'bare_rock_reference_parameters': dict(zip(
         ['albedo', 'Teq', 'Teff', 'R_planet_star'], rock_parameters.tolist())),
+        'bare_rock_temperature_K': blackbody_temperature,
         'spectral_interval': 'pointwise central 68.268949% posterior interval',
         'posterior_density': 'unfilled step histograms per log10 pressure (per dex), bin width 0.25 dex',
         'F1500W_horizontal_bar': 'legacy display bounds 13.6--16.5 um; likelihood uses full photon response',
         'F1500W_display_response': 'lambda * R(lambda) * Fstar_lambda, normalized to its peak, using the reference stellar parameters',
-        'posterior_annotations': 'matching-color dotted 97.5th-percentile total and partial pressure upper limits; one legend in the total-pressure panel; no priors',
+        'posterior_annotations': 'matching-color dotted 97.5th-percentile total and partial pressure upper limits; dashed black induced total-pressure prior',
+        'total_pressure_prior': {'samples': len(total_prior), 'method': 'Scrambled Sobol, seed 1445; sum of four independent log-uniform partial pressures',
+                                 'log10_partial_pressure_bounds': np.column_stack((low, high)).tolist()},
         'total_pressure_upper_limit_quantile': .975,
         'total_pressure_upper_limits_bar': total_upper_limits,
         'partial_pressure_upper_limit_quantile': .975,
